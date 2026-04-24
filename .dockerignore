@@ -1,0 +1,12 @@
+.git
+.gitignore
+.venv
+__pycache__
+.pytest_cache
+*.pyc
+*.pyo
+*.pyd
+apps/web/node_modules
+apps/web/.next
+apps/web/tsconfig.tsbuildinfo
+storage/jobs

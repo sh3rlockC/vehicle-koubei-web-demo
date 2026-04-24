@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+import os
+import sys
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any
+
+from worker_app.artifacts import JobPaths
+from worker_app.dependencies import discover_manifest_path, get_workspace_root, load_dependency_map
+
+DEPENDENCY_MANIFEST = discover_manifest_path(source_path=Path(__file__))
+POSTPROCESS_BRIDGE = Path(__file__).resolve().with_name("postprocess_bridge.py")
+WORDCLOUD_FONT_PATH = os.getenv("WORDCLOUD_FONT_PATH", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
+
+
+@dataclass(frozen=True)
+class StageDefinition:
+    name: str
+    dependency_name: str
+    core: bool = True
+
+
+@dataclass(frozen=True)
+class StageCommand:
+    name: str
+    dependency_name: str
+    command: list[str]
+    cwd: Path
+    core: bool = True
+    fallback_command: list[str] | None = None
+    skip_in_single_platform: bool = False
+    expected_artifacts: tuple[str, ...] = ()
+    optional_artifacts: tuple[str, ...] = ()
+    progress_file: str | None = None
+    parse_json_stdout: bool = False
+
+
+@dataclass
+class StageExecutionError(Exception):
+    stage: str
+    error_code: str
+    message: str
+
+    def __str__(self) -> str:
+        return f"{self.stage}: {self.error_code}: {self.message}"
+
+
+def load_dependencies(manifest_path: Path = DEPENDENCY_MANIFEST) -> dict[str, dict[str, Any]]:
+    return load_dependency_map(manifest_path)
+
+
+def resolve_stage_command(stage: StageCommand, *, single_platform_mode: bool) -> StageCommand | None:
+    if not single_platform_mode:
+        return stage
+    if stage.skip_in_single_platform:
+        return None
+    if stage.fallback_command:
+        return replace(stage, command=stage.fallback_command)
+    return stage
+
+
+def build_stage_commands(
+    *,
+    job_paths: JobPaths,
+    model_name: str,
+    autohome_series_id: str,
+    dongchedi_series_id: str,
+    dependency_map: dict[str, dict[str, Any]] | None = None,
+) -> list[StageCommand]:
+    dependency_map = dependency_map or load_dependencies()
+    workspace_root = get_workspace_root()
+    zj_output = job_paths.outputs.raw / f"ZJ{model_name}原始口碑.xlsx"
+    dcd_output = job_paths.outputs.raw / f"DCD口碑_{model_name}.xlsx"
+    prepared_zj_output = job_paths.outputs.postprocess / f"{model_name}_ZJ预处理口碑.xlsx"
+    dual_output = job_paths.outputs.postprocess / f"{model_name}_双平台口碑汇总.xlsx"
+    summary_output = job_paths.outputs.summary / f"{model_name}_双平台口碑摘要.xlsx"
+    autohome_progress = job_paths.progress / "collecting_autohome.progress.json"
+    dcd_progress = job_paths.progress / "collecting_dcd.progress.json"
+    summary_progress = job_paths.progress / "summarizing.progress.json"
+
+    auto_dep = dependency_map["auto-koubei-collector"]
+    dcd_dep = dependency_map["dcd-koubei-collector"]
+    post_dep = dependency_map["koubei-postprocess"]
+    summary_dep = dependency_map["koubei-keyword-summary-skill"]
+    wordcloud_dep = dependency_map["koubei-wordcloud"]
+
+    summary_dual_command = [
+        sys.executable,
+        summary_dep["entrypoint"],
+        "--autohome-input",
+        str(zj_output),
+        "--dcd-input",
+        str(dcd_output),
+        "--output",
+        str(summary_output),
+        "--model-name",
+        model_name,
+        "--progress-file",
+        str(summary_progress),
+    ]
+    summary_fallback_command = [
+        sys.executable,
+        summary_dep["entrypoint"],
+        "--input",
+        str(zj_output),
+        "--output",
+        str(summary_output),
+        "--model-name",
+        model_name,
+        "--progress-file",
+        str(summary_progress),
+    ]
+
+    return [
+        StageCommand(
+            name="collecting_autohome",
+            dependency_name="auto-koubei-collector",
+            cwd=Path(auto_dep["path"]),
+            command=[
+                sys.executable,
+                auto_dep["entrypoint"],
+                "--series-id",
+                autohome_series_id,
+                "--start-page",
+                "1",
+                "--auto-detect-pages",
+                "--output",
+                str(zj_output),
+                "--workdir",
+                str(workspace_root),
+                "--progress-file",
+                str(autohome_progress),
+            ],
+            core=True,
+            expected_artifacts=(
+                str(zj_output),
+                str(zj_output.with_suffix(".validation.json")),
+                str(autohome_progress),
+            ),
+            progress_file=str(autohome_progress),
+        ),
+        StageCommand(
+            name="collecting_dcd",
+            dependency_name="dcd-koubei-collector",
+            cwd=Path(dcd_dep["path"]),
+            command=[
+                sys.executable,
+                dcd_dep["entrypoint"],
+                "--series-id",
+                dongchedi_series_id,
+                "--start-page",
+                "1",
+                "--output",
+                str(dcd_output),
+                "--progress-file",
+                str(dcd_progress),
+                "--quiet",
+            ],
+            core=True,
+            expected_artifacts=(
+                str(dcd_output),
+                str(dcd_output.with_suffix(".validation.json")),
+                str(dcd_progress),
+            ),
+            optional_artifacts=(str(dcd_output.with_suffix(".failed-pages.json")),),
+            progress_file=str(dcd_progress),
+        ),
+        StageCommand(
+            name="postprocessing",
+            dependency_name="koubei-postprocess",
+            cwd=POSTPROCESS_BRIDGE.parent.parent,
+            command=[
+                sys.executable,
+                str(POSTPROCESS_BRIDGE),
+                "--postprocess-script",
+                post_dep["entrypoint"],
+                "--source-zj-input",
+                str(zj_output),
+                "--prepared-zj-output",
+                str(prepared_zj_output),
+                "--dcd-input",
+                str(dcd_output),
+                "--output",
+                str(dual_output),
+            ],
+            core=True,
+            skip_in_single_platform=True,
+            expected_artifacts=(str(dual_output),),
+            optional_artifacts=(str(prepared_zj_output),),
+        ),
+        StageCommand(
+            name="summarizing",
+            dependency_name="koubei-keyword-summary-skill",
+            cwd=Path(summary_dep["path"]),
+            command=summary_dual_command,
+            core=True,
+            fallback_command=summary_fallback_command,
+            expected_artifacts=(
+                str(summary_output),
+                str(summary_output.with_suffix(".validation.json")),
+                str(summary_progress),
+            ),
+            progress_file=str(summary_progress),
+        ),
+        StageCommand(
+            name="rendering_wordcloud",
+            dependency_name="koubei-wordcloud",
+            cwd=Path(wordcloud_dep["path"]),
+            command=[
+                sys.executable,
+                wordcloud_dep["entrypoint"],
+                "--input",
+                str(summary_output),
+                "--output-dir",
+                str(job_paths.outputs.wordcloud),
+                "--model-name",
+                model_name,
+                "--font-path",
+                WORDCLOUD_FONT_PATH,
+                "--json",
+            ],
+            core=False,
+            expected_artifacts=(str(job_paths.outputs.wordcloud / f"{model_name}_词云词项清单.xlsx"),),
+            optional_artifacts=(
+                str(job_paths.outputs.wordcloud / f"{model_name}_优点词云.png"),
+                str(job_paths.outputs.wordcloud / f"{model_name}_槽点词云.png"),
+            ),
+            parse_json_stdout=True,
+        ),
+    ]

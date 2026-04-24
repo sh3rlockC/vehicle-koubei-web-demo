@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def new_job_id() -> str:
+    return f"job_{utc_now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_job_id)
+    query: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
+    current_stage: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
+    degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    passphrase_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    queue_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    candidates: Mapped[list["JobCandidate"]] = relationship(back_populates="job", cascade="all, delete-orphan")
+    stage_runs: Mapped[list["JobStageRun"]] = relationship(back_populates="job", cascade="all, delete-orphan")
+    artifacts: Mapped[list["JobArtifact"]] = relationship(back_populates="job", cascade="all, delete-orphan")
+    ai_reports: Mapped[list["JobAIReport"]] = relationship(back_populates="job", cascade="all, delete-orphan")
+    qa_chunks: Mapped[list["JobQAChunk"]] = relationship(back_populates="job", cascade="all, delete-orphan")
+
+
+class JobCandidate(Base):
+    __tablename__ = "job_candidates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id", ondelete="CASCADE"), nullable=False)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    series_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    job: Mapped[Job] = relationship(back_populates="candidates")
+
+
+class JobStageRun(Base):
+    __tablename__ = "job_stage_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id", ondelete="CASCADE"), nullable=False)
+    stage_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    job: Mapped[Job] = relationship(back_populates="stage_runs")
+
+
+class JobArtifact(Base):
+    __tablename__ = "job_artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id", ondelete="CASCADE"), nullable=False)
+    artifact_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_path: Mapped[str] = mapped_column(Text, nullable=False)
+    artifact_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    job: Mapped[Job] = relationship(back_populates="artifacts")
+
+
+class JobAIReport(Base):
+    __tablename__ = "job_ai_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id", ondelete="CASCADE"), nullable=False)
+    report_version: Mapped[str] = mapped_column(String(32), nullable=False, default="v1")
+    report_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    job: Mapped[Job] = relationship(back_populates="ai_reports")
+
+
+class JobQAChunk(Base):
+    __tablename__ = "job_qa_chunks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id", ondelete="CASCADE"), nullable=False)
+    chunk_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    tags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    job: Mapped[Job] = relationship(back_populates="qa_chunks")

@@ -1,0 +1,24 @@
+.venv/
+.DS_Store
+.env
+.env.local
+*.egg-info/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
+*.db
+
+apps/api/.pytest_cache/
+apps/api/**/__pycache__/
+apps/worker/.pytest_cache/
+apps/worker/**/__pycache__/
+apps/web/.next/
+apps/web/node_modules/
+apps/web/tsconfig.tsbuildinfo
+
+# Runtime artifacts and local secrets
+storage/jobs/job_*/
+ops/secrets/*
+!ops/secrets/openclaw_gateway_token.placeholder

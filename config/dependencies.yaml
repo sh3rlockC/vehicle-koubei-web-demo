@@ -1,0 +1,43 @@
+dependencies:
+  - name: vehicle-id-finder
+    path: data/repos/vehicle-id-finder
+    runtime: python
+    entrypoint: data/repos/vehicle-id-finder/scripts/find_vehicle_ids.py
+    contract:
+      input: vehicle model name
+      output: autohome and dongchedi candidate JSON
+  - name: auto-koubei-collector
+    path: data/repos/auto-koubei-collector
+    runtime: python
+    entrypoint: data/repos/auto-koubei-collector/scripts/export_autohome_koubei.py
+    contract:
+      input: autohome series id and output path
+      output: raw autohome koubei excel plus validation and progress files
+  - name: dcd-koubei-collector
+    path: data/repos/dcd-koubei-collector
+    runtime: python
+    entrypoint: data/repos/dcd-koubei-collector/scripts/export_dcd_koubei.py
+    contract:
+      input: dongchedi series id and output path
+      output: raw dcd koubei excel plus validation, progress, and failed-page files
+  - name: koubei-postprocess
+    path: data/repos/koubei-postprocess
+    runtime: python
+    entrypoint: data/repos/koubei-postprocess/scripts/build_dual_platform_workbook.py
+    contract:
+      input: raw autohome and dcd excel paths plus output path
+      output: dual-platform workbook
+  - name: koubei-keyword-summary-skill
+    path: data/repos/koubei-keyword-summary-skill
+    runtime: python
+    entrypoint: data/repos/koubei-keyword-summary-skill/skill/scripts/summarize_koubei_excel.py
+    contract:
+      input: autohome and dcd workbook paths plus output path and model name
+      output: summary excel plus validation and progress files
+  - name: koubei-wordcloud
+    path: koubei-wordcloud
+    runtime: python
+    entrypoint: koubei-wordcloud/scripts/generate_wordcloud.py
+    contract:
+      input: summary excel or raw excel paths plus output dir and model name
+      output: wordcloud png files and term excel
