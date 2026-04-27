@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_model_report: str = ""
     llm_model_qa: str = ""
+    vehicle_resolve_cache_ttl_seconds: int = 7 * 24 * 60 * 60
+    vehicle_resolve_platform_timeout_seconds: int = 60
 
     model_config = SettingsConfigDict(
         env_file=".env",

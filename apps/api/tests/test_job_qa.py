@@ -15,6 +15,7 @@ from app.main import create_app
 from app.models import Job, JobArtifact
 from app.services.job_queue import get_job_queue
 from app.services.passphrase import hash_passphrase
+import app.services.qa_service as qa_service
 
 
 class FakeQueue:
@@ -29,6 +30,11 @@ def make_client(tmp_path: Path) -> TestClient:
         pass_phrase_hash=hash_passphrase("weekly-secret"),
         pass_phrase_version="2026-W17",
         session_secret="test-secret",
+        llm_provider="",
+        llm_api_key="",
+        llm_base_url="",
+        llm_model_report="",
+        llm_model_qa="",
         artifact_root=str(tmp_path / "artifacts"),
         workspace_root="/Users/xyc/Documents/codexwork",
     )
@@ -92,9 +98,70 @@ def test_job_qa_answers_grounded_question(tmp_path: Path) -> None:
     payload = response.json()
 
     assert payload["insufficient_evidence"] is False
-    assert payload["citations"]
+    assert payload["citations"] == []
     assert payload["confidence"] in {"medium", "high"}
+    assert payload["answer_source"] == "fallback"
+    assert payload["model_used"] is None
+    assert payload["llm_error"] == "llm_not_configured"
     assert "负向反馈" in payload["answer"] or "槽点" in payload["answer"] or "问题" in payload["answer"]
+
+
+def test_job_qa_uses_llm_generated_answer_when_available(tmp_path: Path, monkeypatch) -> None:
+    class FakeQAClient:
+        def __init__(self) -> None:
+            self.contexts: list[dict] = []
+
+        def generate_answer(self, context: dict) -> str | None:
+            self.contexts.append(context)
+            return "LLM 生成：槽点主要集中在空间和内饰体验，需要优先处理。"
+
+    fake_client = FakeQAClient()
+    monkeypatch.setattr(qa_service, "build_qa_llm_client", lambda _settings: fake_client, raising=False)
+
+    client = make_client(tmp_path)
+    seed_result_job("job_qa_llm")
+    verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify.status_code == 200
+
+    response = client.post(
+        "/api/jobs/job_qa_llm/qa",
+        json={"question": "这款车主要槽点是什么？"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["answer"] == "LLM 生成：槽点主要集中在空间和内饰体验，需要优先处理。"
+    assert payload["answer_source"] == "llm"
+    assert payload["model_used"] is None
+    assert payload["llm_error"] is None
+    assert payload["citations"] == []
+    assert fake_client.contexts
+    assert fake_client.contexts[0]["question"] == "这款车主要槽点是什么？"
+    assert fake_client.contexts[0]["evidence_chunks"]
+
+
+def test_job_qa_audits_llm_fallback_when_client_returns_empty(tmp_path: Path, monkeypatch) -> None:
+    class EmptyQAClient:
+        def generate_answer(self, context: dict) -> str | None:
+            return None
+
+    monkeypatch.setattr(qa_service, "build_qa_llm_client", lambda _settings: EmptyQAClient(), raising=False)
+
+    client = make_client(tmp_path)
+    seed_result_job("job_qa_llm_empty")
+    verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify.status_code == 200
+
+    response = client.post(
+        "/api/jobs/job_qa_llm_empty/qa",
+        json={"question": "这款车主要槽点是什么？"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["answer_source"] == "fallback"
+    assert payload["model_used"] is None
+    assert payload["llm_error"] == "llm_empty_or_failed"
 
 
 def test_job_qa_rejects_question_without_grounding(tmp_path: Path) -> None:
@@ -112,3 +179,5 @@ def test_job_qa_rejects_question_without_grounding(tmp_path: Path) -> None:
 
     assert payload["insufficient_evidence"] is True
     assert payload["citations"] == []
+    assert payload["answer_source"] == "fallback"
+    assert payload["llm_error"] == "insufficient_evidence"

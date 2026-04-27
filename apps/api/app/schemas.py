@@ -173,4 +173,7 @@ class JobQAResponse(BaseModel):
     citations: list[JobQACitationResponse] = Field(default_factory=list)
     confidence: str
     insufficient_evidence: bool
+    answer_source: str = "fallback"
+    model_used: str | None = None
+    llm_error: str | None = None
     follow_up_suggestions: list[str] = Field(default_factory=list)

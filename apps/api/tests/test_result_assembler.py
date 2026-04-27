@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -117,3 +119,25 @@ def test_artifact_download_serves_file(tmp_path: Path) -> None:
     response = client.get("/api/jobs/job_download/artifacts/1")
     assert response.status_code == 200
     assert "attachment" in response.headers.get("content-disposition", "").lower()
+
+
+def test_result_zip_download_bundles_excel_and_wordcloud_files(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    seed_result_job("job_zip")
+
+    verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify.status_code == 200
+
+    response = client.get("/api/jobs/job_zip/artifacts.zip")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert "attachment" in response.headers.get("content-disposition", "").lower()
+
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        names = set(archive.namelist())
+
+    assert "风云X3 PLUS_双平台口碑摘要.xlsx" in names
+    assert "风云X3 PLUS_优点词云.png" in names
+    assert "风云X3 PLUS_槽点词云.png" in names
+    assert "风云X3 PLUS_词云词项清单.xlsx" in names

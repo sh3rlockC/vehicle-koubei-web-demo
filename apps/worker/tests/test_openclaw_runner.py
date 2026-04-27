@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
 import threading
 import time
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -13,7 +16,7 @@ from worker_app.artifacts import ensure_job_dirs
 from worker_app.jobs import StageResult
 from worker_app.openclaw_runner import OpenClawSettings, build_stage_runner, run_autohome_via_openclaw, run_collector_via_openclaw
 from worker_app.progress import ProgressSink
-from worker_app.stages import StageCommand
+from worker_app.stages import StageCommand, StageExecutionError
 
 
 def make_autohome_stage(tmp_path: Path) -> StageCommand:
@@ -105,6 +108,84 @@ def test_build_stage_runner_routes_only_configured_stages_when_openclaw_is_enabl
     assert result.artifact_paths == ["direct"]
 
 
+def test_openclaw_settings_reads_stage_specific_agent_ids_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENCLAW_AGENT_ID", "main")
+    monkeypatch.setenv("OPENCLAW_AUTOHOME_AGENT_ID", "autohome")
+    monkeypatch.setenv("OPENCLAW_DCD_AGENT_ID", "dongchedi")
+
+    settings = OpenClawSettings.from_env()
+
+    assert settings.agent_id == "main"
+    assert settings.agent_id_for_stage("collecting_autohome") == "autohome"
+    assert settings.agent_id_for_stage("collecting_dcd") == "dongchedi"
+    assert settings.agent_id_for_stage("summarizing") == "main"
+
+
+def test_run_collectors_route_to_stage_specific_openclaw_agents(tmp_path: Path) -> None:
+    container_root = tmp_path / "jobs"
+    job_paths = ensure_job_dirs(container_root, "job_openclaw")
+    autohome_stage = make_autohome_stage(tmp_path)
+    dcd_stage = make_dcd_stage(tmp_path)
+    progress_sink = ProgressSink(
+        job_id="job_openclaw",
+        progress_path=job_paths.progress / "progress.json",
+        stages=[autohome_stage.name, dcd_stage.name],
+    )
+    captured_agent_ids: dict[str, str | None] = {}
+
+    class CapturingGatewayClient:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
+            captured_agent_ids[stage_name] = agent_id
+            stage = autohome_stage if stage_name == "collecting_autohome" else dcd_stage
+            for artifact in stage.expected_artifacts:
+                Path(artifact).parent.mkdir(parents=True, exist_ok=True)
+                Path(artifact).write_text("artifact", encoding="utf-8")
+            for artifact in stage.optional_artifacts:
+                Path(artifact).parent.mkdir(parents=True, exist_ok=True)
+                Path(artifact).write_text("[]", encoding="utf-8")
+            return {"status": "completed"}
+
+    settings = OpenClawSettings(
+        enabled=True,
+        agent_id="main",
+        autohome_agent_id="autohome",
+        dcd_agent_id="dongchedi",
+        stages=("collecting_autohome", "collecting_dcd"),
+        artifact_root_container=str(container_root),
+    )
+    gateway_client = CapturingGatewayClient()
+
+    autohome_result = run_collector_via_openclaw(
+        autohome_stage,
+        job_paths,
+        progress_sink,
+        settings=settings,
+        gateway_client=gateway_client,
+    )
+    dcd_result = run_collector_via_openclaw(
+        dcd_stage,
+        job_paths,
+        progress_sink,
+        settings=settings,
+        gateway_client=gateway_client,
+    )
+
+    assert captured_agent_ids == {
+        "collecting_autohome": "autohome",
+        "collecting_dcd": "dongchedi",
+    }
+    assert autohome_result.output_metadata["openclaw_agent_id"] == "autohome"
+    assert dcd_result.output_metadata["openclaw_agent_id"] == "dongchedi"
+
+
 def test_run_autohome_via_openclaw_calls_gateway_agent_and_collects_artifacts(tmp_path: Path) -> None:
     container_root = tmp_path / "jobs"
     host_root = tmp_path / "host-jobs"
@@ -114,13 +195,21 @@ def test_run_autohome_via_openclaw_calls_gateway_agent_and_collects_artifacts(tm
     captured: dict[str, object] = {}
 
     class FakeGatewayClient:
-        def call_agent(self, message: str, *, settings: OpenClawSettings, session_id: str | None = None, stage_name: str = "openclaw") -> dict:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
             captured["message"] = message
             captured["settings"] = settings
             captured["session_id"] = session_id
             captured["stage_name"] = stage_name
             captured["method"] = "agent"
-            captured["params"] = {"message": message, "agentId": settings.agent_id, "timeout": settings.timeout_seconds}
+            captured["params"] = {"message": message, "agentId": agent_id, "timeout": settings.timeout_seconds}
             assert settings.gateway_url == "ws://host.docker.internal:18790"
             for artifact in stage.expected_artifacts:
                 Path(artifact).parent.mkdir(parents=True, exist_ok=True)
@@ -150,6 +239,10 @@ def test_run_autohome_via_openclaw_calls_gateway_agent_and_collects_artifacts(tm
     assert captured["params"]["timeout"] == 1800
     message = captured["message"]
     assert "sh3rlockC/auto-koubei-collector" in message
+    assert "不要创建子代理" in message
+    assert "启动后必须立即创建 progress_file" in message
+    assert "每完成一个页面或阶段都必须刷新 progress_file" in message
+    assert "产物都存在后才报告完成" in message
     assert "series_id=8089" in message
     assert str(host_root / "job_openclaw" / "outputs" / "raw" / "ZJ测试车原始口碑.xlsx") in message
     assert str(host_root / "job_openclaw" / "progress" / "collecting_autohome.progress.json") in message
@@ -166,7 +259,15 @@ def test_run_collector_via_openclaw_supports_dcd_collection_contract(tmp_path: P
     captured: dict[str, object] = {}
 
     class FakeGatewayClient:
-        def call_agent(self, message: str, *, settings: OpenClawSettings, session_id: str | None = None, stage_name: str = "openclaw") -> dict:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
             captured["message"] = message
             captured["stage_name"] = stage_name
             captured["session_id"] = session_id
@@ -195,6 +296,10 @@ def test_run_collector_via_openclaw_supports_dcd_collection_contract(tmp_path: P
     assert captured["stage_name"] == "collecting_dcd"
     assert captured["session_id"] == "vehicle-koubei-job_openclaw-collecting_dcd"
     assert "sh3rlockC/dcd-koubei-collector" in message
+    assert "不要创建子代理" in message
+    assert "启动后必须立即创建 progress_file" in message
+    assert "每完成一个页面或阶段都必须刷新 progress_file" in message
+    assert "产物都存在后才报告完成" in message
     assert "series_id=25545" in message
     assert str(host_root / "job_openclaw" / "outputs" / "raw" / "DCD口碑_测试车.xlsx") in message
     assert str(host_root / "job_openclaw" / "outputs" / "raw" / "DCD口碑_测试车.failed-pages.json") in message
@@ -209,7 +314,15 @@ def test_run_autohome_via_openclaw_uses_job_scoped_session_id(tmp_path: Path) ->
     captured: dict[str, str | None] = {}
 
     class SessionGatewayClient:
-        def call_agent(self, message: str, *, settings: OpenClawSettings, session_id: str | None = None, stage_name: str = "openclaw") -> dict:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
             captured["session_id"] = session_id
             for artifact in stage.expected_artifacts:
                 Path(artifact).parent.mkdir(parents=True, exist_ok=True)
@@ -233,7 +346,15 @@ def test_run_autohome_via_openclaw_waits_for_artifacts_after_agent_acceptance(tm
     progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
 
     class AsyncGatewayClient:
-        def call_agent(self, message: str, *, settings: OpenClawSettings, session_id: str | None = None, stage_name: str = "openclaw") -> dict:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
             def write_artifacts() -> None:
                 time.sleep(0.05)
                 for artifact in stage.expected_artifacts:
@@ -252,3 +373,192 @@ def test_run_autohome_via_openclaw_waits_for_artifacts_after_agent_acceptance(tm
     )
 
     assert set(result.artifact_paths) == set(stage.expected_artifacts)
+
+
+def test_run_autohome_via_openclaw_fails_fast_when_accepted_task_fails(tmp_path: Path) -> None:
+    stage = make_autohome_stage(tmp_path)
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+    task_db = tmp_path / "runs.sqlite"
+    with sqlite3.connect(task_db) as db:
+        db.execute(
+            """
+            CREATE TABLE task_runs (
+                task_id TEXT PRIMARY KEY,
+                run_id TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                ended_at INTEGER,
+                last_event_at INTEGER
+            )
+            """
+        )
+        db.execute(
+            "INSERT INTO task_runs (task_id, run_id, status, error, ended_at, last_event_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("task-1", "run-1", "failed", "LLM request failed: provider rejected the request schema or tool payload.", 1000, 1000),
+        )
+
+    class FailedAcceptedGatewayClient:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
+            return {"status": "accepted", "taskId": "task-1", "runId": "run-1"}
+
+    with pytest.raises(StageExecutionError) as exc_info:
+        run_autohome_via_openclaw(
+            stage,
+            job_paths,
+            progress_sink,
+            settings=OpenClawSettings(
+                enabled=True,
+                timeout_seconds=2,
+                artifact_poll_interval_seconds=0.01,
+                task_db_path=str(task_db),
+            ),
+            gateway_client=FailedAcceptedGatewayClient(),
+        )
+
+    assert exc_info.value.error_code == "OPENCLAW_TASK_FAILED"
+    assert "provider rejected the request schema" in exc_info.value.message
+
+
+def test_run_autohome_via_openclaw_fails_when_related_child_task_fails(tmp_path: Path) -> None:
+    stage = make_autohome_stage(tmp_path)
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+    task_db = tmp_path / "runs.sqlite"
+    with sqlite3.connect(task_db) as db:
+        db.execute(
+            """
+            CREATE TABLE task_runs (
+                task_id TEXT PRIMARY KEY,
+                run_id TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                task TEXT,
+                created_at INTEGER,
+                ended_at INTEGER,
+                last_event_at INTEGER
+            )
+            """
+        )
+        db.execute(
+            "INSERT INTO task_runs (task_id, run_id, status, error, task, created_at, ended_at, last_event_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("parent-task", "parent-run", "succeeded", "", "parent accepted", 1000, 1100, 1100),
+        )
+        db.execute(
+            "INSERT INTO task_runs (task_id, run_id, status, error, task, created_at, ended_at, last_event_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "child-task",
+                "child-run",
+                "failed",
+                "child command failed",
+                f"执行命令：python3 skills/auto-koubei-collector/scripts/export_autohome_koubei.py --output {stage.expected_artifacts[0]}",
+                1200,
+                1300,
+                1300,
+            ),
+        )
+
+    class AcceptedGatewayClient:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
+            return {"status": "accepted", "taskId": "parent-task", "runId": "parent-run"}
+
+    with pytest.raises(StageExecutionError) as exc_info:
+        run_autohome_via_openclaw(
+            stage,
+            job_paths,
+            progress_sink,
+            settings=OpenClawSettings(
+                enabled=True,
+                timeout_seconds=1,
+                artifact_poll_interval_seconds=0.01,
+                task_db_path=str(task_db),
+            ),
+            gateway_client=AcceptedGatewayClient(),
+        )
+
+    assert exc_info.value.error_code == "OPENCLAW_TASK_FAILED"
+    assert "child command failed" in exc_info.value.message
+
+
+def test_run_autohome_via_openclaw_fails_when_related_child_succeeds_without_artifacts(tmp_path: Path) -> None:
+    stage = make_autohome_stage(tmp_path)
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+    task_db = tmp_path / "runs.sqlite"
+    with sqlite3.connect(task_db) as db:
+        db.execute(
+            """
+            CREATE TABLE task_runs (
+                task_id TEXT PRIMARY KEY,
+                run_id TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                task TEXT,
+                created_at INTEGER,
+                ended_at INTEGER,
+                last_event_at INTEGER
+            )
+            """
+        )
+        db.execute(
+            "INSERT INTO task_runs (task_id, run_id, status, error, task, created_at, ended_at, last_event_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("parent-task", "parent-run", "succeeded", "", "parent accepted", 1000, 1100, 1100),
+        )
+        db.execute(
+            "INSERT INTO task_runs (task_id, run_id, status, error, task, created_at, ended_at, last_event_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "child-task",
+                "child-run",
+                "succeeded",
+                "",
+                f"执行命令：python3 skills/auto-koubei-collector/scripts/export_autohome_koubei.py --output {stage.expected_artifacts[0]}",
+                1200,
+                1300,
+                1300,
+            ),
+        )
+
+    class AcceptedGatewayClient:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
+            return {"status": "accepted", "taskId": "parent-task", "runId": "parent-run"}
+
+    with pytest.raises(StageExecutionError) as exc_info:
+        run_autohome_via_openclaw(
+            stage,
+            job_paths,
+            progress_sink,
+            settings=OpenClawSettings(
+                enabled=True,
+                timeout_seconds=30,
+                artifact_poll_interval_seconds=0.01,
+                task_db_path=str(task_db),
+            ),
+            gateway_client=AcceptedGatewayClient(),
+        )
+
+    assert exc_info.value.error_code == "OPENCLAW_ARTIFACTS_MISSING"
+    assert "OpenClaw related task ended but expected artifacts are missing" in exc_info.value.message

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +43,38 @@ def test_pipeline_completes_when_all_stages_succeed(tmp_path: Path) -> None:
     assert result.degraded is False
     assert result.completed_stages == [stage.name for stage in stage_commands]
     assert (tmp_path / "job_success" / "progress" / "progress.json").exists()
+
+
+def test_pipeline_starts_collectors_concurrently(tmp_path: Path) -> None:
+    stage_commands = [
+        make_stage("collecting_autohome"),
+        make_stage("collecting_dcd"),
+        make_stage("postprocessing"),
+    ]
+    autohome_started = threading.Event()
+    dcd_started = threading.Event()
+    completed: list[str] = []
+
+    def runner(command, job_paths, progress_sink):
+        if command.name == "collecting_autohome":
+            autohome_started.set()
+            assert dcd_started.wait(0.5), "dcd collector did not start before autohome finished"
+        elif command.name == "collecting_dcd":
+            dcd_started.set()
+            assert autohome_started.wait(0.5), "autohome collector did not start before dcd finished"
+
+        completed.append(command.name)
+        return StageResult(status="success")
+
+    result = run_pipeline(
+        JobContext(job_id="job_parallel_collectors", model_name="风云X3 PLUS", artifact_root=tmp_path),
+        stage_commands,
+        runner,
+    )
+
+    assert result.status == "completed"
+    assert {"collecting_autohome", "collecting_dcd"}.issubset(completed)
+    assert completed[-1] == "postprocessing"
 
 
 def test_pipeline_degrades_when_non_core_stage_fails(tmp_path: Path) -> None:

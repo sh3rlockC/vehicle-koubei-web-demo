@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from app.config import Settings, get_settings
 from app.models import JobAIReport, JobArtifact, JobQAChunk
+from app.services.llm_client import DisabledQAAnswerLLMClient, build_qa_llm_client
 from app.services.result_reader import read_summary_workbook
 
 
@@ -36,6 +39,14 @@ FOLLOW_UP_SUGGESTIONS = {
     "action": ["这些问题主要集中在哪些方向？", "平台差异在哪里？", "给老板汇报怎么说？"],
     "generic": ["大家最满意什么？", "大家最不满意什么？", "给老板汇报怎么说？"],
 }
+
+
+@dataclass(frozen=True)
+class QAAnswerAttempt:
+    answer: str | None
+    answer_source: str
+    model_used: str | None
+    llm_error: str | None
 
 
 def _normalize_text(value: str) -> str:
@@ -209,6 +220,100 @@ def _chunk_summary(chunk: JobQAChunk) -> str:
     return _normalize_text(chunk.text.rstrip("。")) + "。"
 
 
+def _sentence_part(value: str) -> str:
+    return _normalize_text(value).rstrip("。.!！?？；;，,、")
+
+
+def _answer_from_parts(prefix: str, summaries: list[str], empty_answer: str) -> str:
+    parts = [_sentence_part(summary) for summary in summaries if _sentence_part(summary)]
+    return f"{prefix}{'；'.join(parts[:3])}。" if parts else empty_answer
+
+
+def _normalize_llm_answer(answer: str) -> str:
+    normalized = _normalize_text(answer)
+    if not normalized:
+        return ""
+    return normalized if normalized.endswith(("。", "！", "？", ".", "!", "?")) else f"{normalized}。"
+
+
+def _build_llm_context(
+    question: str,
+    *,
+    intents: list[str],
+    chunks: list[JobQAChunk],
+    ai_report: JobAIReport | None,
+    model_name: str | None,
+) -> dict:
+    return {
+        "question": question,
+        "model_name": model_name or "",
+        "intents": intents,
+        "instructions": [
+            "只根据 evidence_chunks 和 ai_report 回答，不引入外部资料。",
+            "回答使用中文自然段，完整展开，不要输出引用编号、证据列表或 markdown 表格。",
+            "如果证据不足，明确说明当前任务证据不足。",
+        ],
+        "evidence_chunks": [
+            {
+                "chunk_id": chunk.chunk_id,
+                "source_type": chunk.source_type,
+                "text": chunk.text,
+                "metadata": chunk.metadata_json or {},
+            }
+            for chunk in chunks
+        ],
+        "ai_report": ai_report.report_json if ai_report and isinstance(ai_report.report_json, dict) else None,
+    }
+
+
+def _generate_llm_answer(
+    question: str,
+    *,
+    intents: list[str],
+    chunks: list[JobQAChunk],
+    ai_report: JobAIReport | None,
+    model_name: str | None,
+    settings: Settings | None = None,
+) -> QAAnswerAttempt:
+    active_settings = settings or get_settings()
+    model_used = active_settings.llm_model_qa or active_settings.llm_model_report or None
+    client = build_qa_llm_client(active_settings)
+
+    try:
+        answer = client.generate_answer(
+            _build_llm_context(
+                question,
+                intents=intents,
+                chunks=chunks,
+                ai_report=ai_report,
+                model_name=model_name,
+            )
+        )
+    except Exception as exc:
+        return QAAnswerAttempt(
+            answer=None,
+            answer_source="fallback",
+            model_used=model_used,
+            llm_error=f"llm_exception:{exc.__class__.__name__}",
+        )
+
+    normalized = _normalize_llm_answer(answer) if answer else None
+    if normalized:
+        return QAAnswerAttempt(
+            answer=normalized,
+            answer_source="llm",
+            model_used=model_used,
+            llm_error=None,
+        )
+
+    return QAAnswerAttempt(
+        answer=None,
+        answer_source="fallback",
+        model_used=model_used,
+        llm_error="llm_not_configured" if isinstance(client, DisabledQAAnswerLLMClient) else "llm_empty_or_failed",
+    )
+
+
 def _build_answer(question: str, *, intents: list[str], chunks: list[JobQAChunk], ai_report: JobAIReport | None) -> str:
     summaries = list(dict.fromkeys(_chunk_summary(chunk) for chunk in chunks if chunk.text))
     if "boss" in intents and ai_report and isinstance(ai_report.report_json, dict):
@@ -218,23 +323,26 @@ def _build_answer(question: str, *, intents: list[str], chunks: list[JobQAChunk]
             return "给老板汇报可以先讲这 3 点：" + "；".join(brief_lines[:3]) + "。"
 
     if "boss" in intents:
-        return (
-            "给老板汇报可以先讲这几句：" + "；".join(summaries[:3]) + "。"
-            if summaries
-            else "当前证据不足，暂时无法整理老板汇报稿。"
-        )
+        return _answer_from_parts("给老板汇报可以先讲这几句：", summaries, "当前证据不足，暂时无法整理老板汇报稿。")
     if "action" in intents:
-        return "基于当前结果，优先动作建议是：" + "；".join(summaries[:3]) + "。"
+        return _answer_from_parts("基于当前结果，优先动作建议是：", summaries, "当前证据不足，暂时无法整理动作建议。")
     if "weakness" in intents:
-        return "当前最集中的负向反馈主要是：" + "；".join(summaries[:3]) + "。"
+        return _answer_from_parts("当前最集中的负向反馈主要是：", summaries, "当前证据不足，暂时无法判断主要槽点。")
     if "strength" in intents:
-        return "当前最稳定的正向卖点主要是：" + "；".join(summaries[:3]) + "。"
+        return _answer_from_parts("当前最稳定的正向卖点主要是：", summaries, "当前证据不足，暂时无法判断主要卖点。")
     if "comparison" in intents:
-        return "从平台对比看，当前最相关的差异是：" + "；".join(summaries[:3]) + "。"
-    return f"基于当前任务结果，和“{question}”最相关的是：" + "；".join(summaries[:3]) + "。"
+        return _answer_from_parts("从平台对比看，当前最相关的差异是：", summaries, "当前证据不足，暂时无法判断平台差异。")
+    return _answer_from_parts(f"基于当前任务结果，和“{question}”最相关的是：", summaries, "当前证据不足，暂时无法回答这个问题。")
 
 
-def answer_job_question(db: Session, *, job_id: str, question: str, model_name: str | None = None) -> dict:
+def answer_job_question(
+    db: Session,
+    *,
+    job_id: str,
+    question: str,
+    model_name: str | None = None,
+    settings: Settings | None = None,
+) -> dict:
     summary_artifact = find_summary_artifact(db, job_id)
     if summary_artifact is None:
         raise ValueError("summary artifact missing")
@@ -262,6 +370,9 @@ def answer_job_question(db: Session, *, job_id: str, question: str, model_name: 
             "citations": [],
             "confidence": "low",
             "insufficient_evidence": True,
+            "answer_source": "fallback",
+            "model_used": None,
+            "llm_error": "insufficient_evidence",
             "follow_up_suggestions": FOLLOW_UP_SUGGESTIONS["generic"],
         }
 
@@ -273,18 +384,22 @@ def answer_job_question(db: Session, *, job_id: str, question: str, model_name: 
         .first()
     )
     primary_intent = intents[0]
+    llm_attempt = _generate_llm_answer(
+        question,
+        intents=intents,
+        chunks=top_chunks,
+        ai_report=ai_report,
+        model_name=model_name,
+        settings=settings,
+    )
+    answer = llm_attempt.answer or _build_answer(question, intents=intents, chunks=top_chunks, ai_report=ai_report)
     return {
-        "answer": _build_answer(question, intents=intents, chunks=top_chunks, ai_report=ai_report),
-        "citations": [
-            {
-                "chunk_id": chunk.chunk_id,
-                "source_type": chunk.source_type,
-                "text": chunk.text,
-                "metadata": chunk.metadata_json or {},
-            }
-            for chunk in top_chunks
-        ],
+        "answer": answer,
+        "citations": [],
         "confidence": "high" if top_score >= 8 else "medium",
         "insufficient_evidence": False,
+        "answer_source": llm_attempt.answer_source,
+        "model_used": llm_attempt.model_used,
+        "llm_error": llm_attempt.llm_error,
         "follow_up_suggestions": FOLLOW_UP_SUGGESTIONS.get(primary_intent, FOLLOW_UP_SUGGESTIONS["generic"]),
     }

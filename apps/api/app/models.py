@@ -112,3 +112,14 @@ class JobQAChunk(Base):
     metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
     job: Mapped[Job] = relationship(back_populates="qa_chunks")
+
+
+class VehicleResolveCache(Base):
+    __tablename__ = "vehicle_resolve_cache"
+
+    query_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    query: Mapped[str] = mapped_column(String(255), nullable=False)
+    response_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

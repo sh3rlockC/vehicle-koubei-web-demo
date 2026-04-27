@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from io import BytesIO
 import json
 from pathlib import Path
+from urllib.parse import quote
+import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from rq import Queue
 from sqlalchemy.orm import Session
 
@@ -58,10 +61,39 @@ def _read_stage_progress(settings: Settings, job_id: str, stage_name: str, stage
     if percent is None and isinstance(payload.get("overall"), dict):
         percent = _clamp_percent(payload["overall"].get("percent"))
     if percent is None:
-        percent = 100 if stage_status in {"success", "completed"} else 0
+        if stage_status in {"success", "completed"}:
+            percent = 100
+        elif stage_status == "running":
+            percent = 1
+        else:
+            percent = 0
 
     message = payload.get("message")
+    if not message and stage_status == "running":
+        message = "采集已启动，等待页面进度"
     return percent, message if isinstance(message, str) and message else None
+
+
+def _is_result_bundle_artifact(path: str) -> bool:
+    lower_path = path.lower()
+    return lower_path.endswith((".xlsx", ".png"))
+
+
+def _safe_zip_name(path: Path, seen: set[str]) -> str:
+    base_name = path.name or "artifact"
+    if base_name not in seen:
+        seen.add(base_name)
+        return base_name
+
+    stem = path.stem or "artifact"
+    suffix = path.suffix
+    index = 2
+    while True:
+        candidate = f"{stem}_{index}{suffix}"
+        if candidate not in seen:
+            seen.add(candidate)
+            return candidate
+        index += 1
 
 
 @router.post("", response_model=CreateJobResponse)
@@ -258,7 +290,13 @@ def answer_job_qa(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="qa is not available for this job")
 
     try:
-        result = answer_job_question(db, job_id=job_id, question=payload.question, model_name=job.model_name)
+        result = answer_job_question(
+            db,
+            job_id=job_id,
+            question=payload.question,
+            model_name=job.model_name,
+            settings=settings,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
@@ -281,3 +319,44 @@ def download_artifact(
     if not path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="artifact file missing")
     return FileResponse(path=path, filename=path.name)
+
+
+@router.get("/{job_id}/artifacts.zip")
+def download_result_bundle(
+    job_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    _ensure_session(request, settings)
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+
+    artifacts = (
+        db.query(JobArtifact)
+        .filter(JobArtifact.job_id == job_id)
+        .order_by(JobArtifact.id.asc())
+        .all()
+    )
+    paths = [
+        Path(artifact.artifact_path)
+        for artifact in artifacts
+        if _is_result_bundle_artifact(artifact.artifact_path) and Path(artifact.artifact_path).exists()
+    ]
+    if not paths:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="no downloadable result artifacts")
+
+    buffer = BytesIO()
+    seen_names: set[str] = set()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in paths:
+            archive.write(path, arcname=_safe_zip_name(path, seen_names))
+
+    filename = f"{job.model_name}_全部结果.zip"
+    encoded_filename = quote(filename)
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=result_bundle.zip; filename*=UTF-8''{encoded_filename}"},
+    )

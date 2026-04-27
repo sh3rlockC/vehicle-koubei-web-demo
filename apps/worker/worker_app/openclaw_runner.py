@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import platform
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ class OpenClawSettings:
     gateway_url: str = "ws://host.docker.internal:18790"
     token_file: str = "/run/secrets/openclaw_gateway_token"
     agent_id: str = "main"
+    autohome_agent_id: str | None = None
+    dcd_agent_id: str | None = None
     collector_skill: str = "sh3rlockC/auto-koubei-collector"
     dcd_collector_skill: str = "sh3rlockC/dcd-koubei-collector"
     timeout_seconds: int = 1800
@@ -30,6 +33,7 @@ class OpenClawSettings:
     stages: tuple[str, ...] = ("collecting_autohome", "collecting_dcd")
     artifact_root_container: str = "/srv/koubei/jobs"
     artifact_root_host: str | None = None
+    task_db_path: str | None = None
 
     @classmethod
     def from_env(cls) -> "OpenClawSettings":
@@ -38,6 +42,8 @@ class OpenClawSettings:
             gateway_url=os.getenv("OPENCLAW_GATEWAY_URL", cls.gateway_url),
             token_file=os.getenv("OPENCLAW_GATEWAY_TOKEN_FILE", cls.token_file),
             agent_id=os.getenv("OPENCLAW_AGENT_ID", cls.agent_id),
+            autohome_agent_id=os.getenv("OPENCLAW_AUTOHOME_AGENT_ID") or None,
+            dcd_agent_id=os.getenv("OPENCLAW_DCD_AGENT_ID") or None,
             collector_skill=os.getenv("OPENCLAW_AUTOHOME_COLLECTOR_SKILL", os.getenv("OPENCLAW_COLLECTOR_SKILL", cls.collector_skill)),
             dcd_collector_skill=os.getenv("OPENCLAW_DCD_COLLECTOR_SKILL", cls.dcd_collector_skill),
             timeout_seconds=int(os.getenv("OPENCLAW_TIMEOUT_SECONDS", os.getenv("OPENCLAW_AGENT_TIMEOUT_SECONDS", str(cls.timeout_seconds)))),
@@ -45,7 +51,15 @@ class OpenClawSettings:
             stages=_env_list("OPENCLAW_ADAPTER_STAGES", cls.stages),
             artifact_root_container=os.getenv("ARTIFACT_ROOT", cls.artifact_root_container),
             artifact_root_host=os.getenv("OPENCLAW_ARTIFACT_ROOT_HOST") or None,
+            task_db_path=os.getenv("OPENCLAW_TASK_DB_PATH") or None,
         )
+
+    def agent_id_for_stage(self, stage_name: str) -> str:
+        if stage_name == "collecting_autohome":
+            return self.autohome_agent_id or self.agent_id
+        if stage_name == "collecting_dcd":
+            return self.dcd_agent_id or self.agent_id
+        return self.agent_id
 
     def read_token(self) -> str | None:
         token_path = Path(self.token_file)
@@ -63,6 +77,7 @@ class OpenClawGatewayClientProtocol(Protocol):
         settings: OpenClawSettings,
         session_id: str | None = None,
         stage_name: str = "openclaw",
+        agent_id: str | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -130,10 +145,14 @@ def _build_autohome_message(command: StageCommand, settings: OpenClawSettings) -
             f"validation_json_path={_host_path(validation_path, settings)}",
             f"progress_file={_host_path(progress_file, settings)}",
             "要求：",
-            "1. 采集汽车之家用户口碑，输出 Excel 到 output_path。",
-            "2. 输出 validation_json_path，用于说明采集页数、记录数和校验结果。",
-            "3. 按现有 progress JSON contract 写入 progress_file。",
-            "4. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
+            "1. 不要创建子代理、不要另起新对话；在当前任务中同步执行脚本并等待完成。",
+            "2. 采集汽车之家用户口碑，输出 Excel 到 output_path。",
+            "3. 输出 validation_json_path，用于说明采集页数、记录数和校验结果。",
+            "4. 按现有 progress JSON contract 写入 progress_file。",
+            "5. 启动后必须立即创建 progress_file，初始 percent 可为 0 或 1，并写入可读 message。",
+            "6. 每完成一个页面或阶段都必须刷新 progress_file，至少包含 percent 或 overall.percent。",
+            "7. 只有 output_path、validation_json_path、progress_file 产物都存在后才报告完成。",
+            "8. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
         ]
     )
 
@@ -157,11 +176,15 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
             f"failed_pages_json_path={_host_path(failed_pages_path, settings)}",
             f"progress_file={_host_path(progress_file, settings)}",
             "要求：",
-            "1. 采集懂车帝用户口碑，输出 Excel 到 output_path。",
-            "2. 输出 validation_json_path，用于说明采集页数、记录数和校验结果。",
-            "3. 如存在失败分页，输出 failed_pages_json_path；无失败分页也可以写空数组。",
-            "4. 按现有 progress JSON contract 写入 progress_file。",
-            "5. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
+            "1. 不要创建子代理、不要另起新对话；在当前任务中同步执行脚本并等待完成。",
+            "2. 采集懂车帝用户口碑，输出 Excel 到 output_path。",
+            "3. 输出 validation_json_path，用于说明采集页数、记录数和校验结果。",
+            "4. 如存在失败分页，输出 failed_pages_json_path；无失败分页也可以写空数组。",
+            "5. 按现有 progress JSON contract 写入 progress_file。",
+            "6. 启动后必须立即创建 progress_file，初始 percent 可为 0 或 1，并写入可读 message。",
+            "7. 每完成一个页面或阶段都必须刷新 progress_file，至少包含 percent 或 overall.percent。",
+            "8. 只有 output_path、validation_json_path、progress_file 产物都存在后才报告完成。",
+            "9. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
         ]
     )
 
@@ -186,6 +209,136 @@ def _collector_skill_for_stage(command: StageCommand, settings: OpenClawSettings
     return ""
 
 
+def _read_openclaw_task_status(
+    *,
+    settings: OpenClawSettings,
+    task_id: str | None,
+    run_id: str | None,
+) -> dict[str, str] | None:
+    if not settings.task_db_path or not (task_id or run_id):
+        return None
+
+    task_db_path = Path(settings.task_db_path)
+    if not task_db_path.exists():
+        return None
+
+    try:
+        with sqlite3.connect(f"file:{task_db_path}?mode=ro", uri=True, timeout=1) as db:
+            db.row_factory = sqlite3.Row
+            row = db.execute(
+                """
+                SELECT task_id, run_id, status, error
+                FROM task_runs
+                WHERE (? IS NOT NULL AND task_id = ?)
+                   OR (? IS NOT NULL AND run_id = ?)
+                ORDER BY ended_at DESC NULLS LAST, last_event_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                (task_id, task_id, run_id, run_id),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+
+    if row is None:
+        return None
+    return {
+        "task_id": str(row["task_id"] or ""),
+        "run_id": str(row["run_id"] or ""),
+        "status": str(row["status"] or ""),
+        "error": str(row["error"] or ""),
+    }
+
+
+def _openclaw_task_markers(command: StageCommand, settings: OpenClawSettings) -> list[str]:
+    markers: list[str] = []
+    values = [*command.expected_artifacts]
+    if command.progress_file:
+        values.append(command.progress_file)
+
+    for value in values:
+        if not value:
+            continue
+        for marker in (value, _host_path(value, settings)):
+            if marker and marker not in markers:
+                markers.append(marker)
+    return markers
+
+
+def _read_related_openclaw_failure(
+    *,
+    settings: OpenClawSettings,
+    markers: list[str],
+) -> dict[str, str] | None:
+    if not settings.task_db_path or not markers:
+        return None
+
+    task_db_path = Path(settings.task_db_path)
+    if not task_db_path.exists():
+        return None
+
+    where_clause = " OR ".join("task LIKE ?" for _ in markers)
+    params = [f"%{marker}%" for marker in markers]
+    try:
+        with sqlite3.connect(f"file:{task_db_path}?mode=ro", uri=True, timeout=1) as db:
+            db.row_factory = sqlite3.Row
+            row = db.execute(
+                f"""
+                SELECT task_id, run_id, status, error
+                FROM task_runs
+                WHERE status IN ('failed', 'timed_out', 'cancelled', 'lost')
+                  AND ({where_clause})
+                ORDER BY ended_at DESC NULLS LAST, last_event_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+
+    if row is None:
+        return None
+    return {
+        "task_id": str(row["task_id"] or ""),
+        "run_id": str(row["run_id"] or ""),
+        "status": str(row["status"] or ""),
+        "error": str(row["error"] or ""),
+    }
+
+
+def _read_related_openclaw_status_counts(
+    *,
+    settings: OpenClawSettings,
+    markers: list[str],
+) -> dict[str, int] | None:
+    if not settings.task_db_path or not markers:
+        return None
+
+    task_db_path = Path(settings.task_db_path)
+    if not task_db_path.exists():
+        return None
+
+    where_clause = " OR ".join("task LIKE ?" for _ in markers)
+    params = [f"%{marker}%" for marker in markers]
+    try:
+        with sqlite3.connect(f"file:{task_db_path}?mode=ro", uri=True, timeout=1) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                f"""
+                SELECT status, COUNT(*) AS count
+                FROM task_runs
+                WHERE {where_clause}
+                GROUP BY status
+                """,
+                params,
+            ).fetchall()
+    except sqlite3.Error:
+        return None
+
+    if not rows:
+        return None
+    return {str(row["status"] or ""): int(row["count"] or 0) for row in rows}
+
+
 class OpenClawGatewayClient:
     def call_agent(
         self,
@@ -194,6 +347,7 @@ class OpenClawGatewayClient:
         settings: OpenClawSettings,
         session_id: str | None = None,
         stage_name: str = "openclaw",
+        agent_id: str | None = None,
     ) -> dict[str, Any]:
         token = settings.read_token()
         if token is None:
@@ -202,7 +356,16 @@ class OpenClawGatewayClient:
                 error_code="CONFIG_ERROR",
                 message=f"OpenClaw gateway token file not found: {settings.token_file}",
             )
-        return asyncio.run(self._call_agent_async(message=message, settings=settings, token=token, session_id=session_id, stage_name=stage_name))
+        return asyncio.run(
+            self._call_agent_async(
+                message=message,
+                settings=settings,
+                token=token,
+                session_id=session_id,
+                stage_name=stage_name,
+                agent_id=agent_id or settings.agent_id_for_stage(stage_name),
+            )
+        )
 
     async def _call_agent_async(
         self,
@@ -212,6 +375,7 @@ class OpenClawGatewayClient:
         token: str,
         session_id: str | None,
         stage_name: str,
+        agent_id: str,
     ) -> dict[str, Any]:
         try:
             import websockets
@@ -229,7 +393,7 @@ class OpenClawGatewayClient:
                 method="agent",
                 params={
                     "message": message,
-                    "agentId": settings.agent_id,
+                    "agentId": agent_id,
                     "sessionId": session_id,
                     "timeout": settings.timeout_seconds,
                     "idempotencyKey": str(uuid.uuid4()),
@@ -314,12 +478,14 @@ def run_collector_via_openclaw(
     stderr_log = job_paths.logs / f"{command.name}.openclaw.stderr.log"
     client = gateway_client or OpenClawGatewayClient()
     session_id = f"vehicle-koubei-{job_paths.root.name}-{command.name}"
+    agent_id = settings.agent_id_for_stage(command.name)
     try:
         response = client.call_agent(
             _build_collector_message(command, settings),
             settings=settings,
             session_id=session_id,
             stage_name=command.name,
+            agent_id=agent_id,
         )
     except StageExecutionError:
         raise
@@ -334,7 +500,7 @@ def run_collector_via_openclaw(
     _write_stage_log(stderr_log, "")
 
     if response.get("status") == "accepted":
-        _wait_for_expected_artifacts(command, settings)
+        _wait_for_expected_artifacts(command, settings, response=response)
 
     artifact_paths, output_metadata = _collect_existing_artifacts(command, "")
     output_metadata.update(
@@ -342,7 +508,7 @@ def run_collector_via_openclaw(
             "stdout_log": str(stdout_log),
             "stderr_log": str(stderr_log),
             "openclaw_gateway_url": settings.gateway_url,
-            "openclaw_agent_id": settings.agent_id,
+            "openclaw_agent_id": agent_id,
             "openclaw_skill": _collector_skill_for_stage(command, settings),
         }
     )
@@ -369,12 +535,45 @@ def run_autohome_via_openclaw(
     )
 
 
-def _wait_for_expected_artifacts(command: StageCommand, settings: OpenClawSettings) -> None:
+def _wait_for_expected_artifacts(command: StageCommand, settings: OpenClawSettings, *, response: dict[str, Any] | None = None) -> None:
+    task_id = str(response.get("taskId") or response.get("task_id") or "") if response else ""
+    run_id = str(response.get("runId") or response.get("run_id") or response.get("sourceId") or "") if response else ""
+    related_markers = _openclaw_task_markers(command, settings)
     deadline = time.monotonic() + max(settings.timeout_seconds, 1)
     while True:
         missing = [artifact for artifact in command.expected_artifacts if not Path(artifact).exists()]
         if not missing:
             return
+
+        task_status = _read_openclaw_task_status(settings=settings, task_id=task_id or None, run_id=run_id or None)
+        if task_status and task_status["status"] in {"failed", "timed_out", "cancelled", "lost"}:
+            error_detail = task_status["error"] or f"OpenClaw task ended with status={task_status['status']}"
+            raise StageExecutionError(
+                stage=command.name,
+                error_code="OPENCLAW_TASK_FAILED",
+                message=error_detail,
+            )
+
+        related_failure = _read_related_openclaw_failure(settings=settings, markers=related_markers)
+        if related_failure:
+            error_detail = related_failure["error"] or f"Related OpenClaw task ended with status={related_failure['status']}"
+            raise StageExecutionError(
+                stage=command.name,
+                error_code="OPENCLAW_TASK_FAILED",
+                message=error_detail,
+            )
+
+        related_status_counts = _read_related_openclaw_status_counts(settings=settings, markers=related_markers)
+        active_statuses = {"accepted", "created", "pending", "queued", "running", "scheduled"}
+        if related_status_counts and not (set(related_status_counts) & active_statuses):
+            raise StageExecutionError(
+                stage=command.name,
+                error_code="OPENCLAW_ARTIFACTS_MISSING",
+                message=(
+                    "OpenClaw related task ended but expected artifacts are missing: "
+                    + ", ".join(missing)
+                ),
+            )
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:

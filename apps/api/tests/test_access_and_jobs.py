@@ -192,3 +192,46 @@ def test_progress_endpoint_includes_collector_stage_percentages(tmp_path: Path) 
     assert stages["collecting_autohome"]["progress_message"] == "正在采集第 2 页"
     assert stages["collecting_dcd"]["progress_percent"] == 12
     assert stages["collecting_dcd"]["progress_message"] == "正在采集懂车帝第 1 页"
+
+
+def test_progress_endpoint_returns_running_fallback_when_collector_progress_file_is_missing(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path)
+    verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify_response.status_code == 200
+
+    create_response = client.post(
+        "/api/jobs",
+        json={
+            "query": "风云X3 PLUS",
+            "selected_candidates": {
+                "autohome": {"series_id": "8089", "title": "风云X3 PLUS", "source": "fixture"},
+                "dongchedi": {"series_id": "25398", "title": "风云X3 PLUS", "source": "fixture"},
+            },
+        },
+    )
+    job_id = create_response.json()["job_id"]
+
+    session = get_session_local()()
+    try:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.status = "collecting_dcd"
+        job.current_stage = "collecting_dcd"
+        session.add_all(
+            [
+                JobStageRun(job_id=job_id, stage_name="collecting_autohome", attempt_no=1, status="running"),
+                JobStageRun(job_id=job_id, stage_name="collecting_dcd", attempt_no=1, status="running"),
+            ]
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    progress_response = client.get(f"/api/jobs/{job_id}/progress")
+
+    assert progress_response.status_code == 200
+    stages = {stage["name"]: stage for stage in progress_response.json()["stages"]}
+    assert stages["collecting_autohome"]["progress_percent"] == 1
+    assert stages["collecting_autohome"]["progress_message"] == "采集已启动，等待页面进度"
+    assert stages["collecting_dcd"]["progress_percent"] == 1
+    assert stages["collecting_dcd"]["progress_message"] == "采集已启动，等待页面进度"
