@@ -1,18 +1,23 @@
 # 车型口碑 Web Demo 下一步交接卡
 
-更新时间：2026-04-24
+更新时间：2026-04-27
 
 ## 当前可用状态
 
-- 分支：`codex-koubei-demo`
+- 分支：`main`
+- remote：`origin https://github.com/sh3rlockC/vehicle-koubei-web-demo.git`
 - 最近关键提交：
-  - `f16375c Ignore local OpenClaw runtime`
-  - `c385205 Add manual fallback and localize koubei demo`
-  - `043f43b Containerize the koubei demo and add grounded QA`
+  - `1dafe31 Initial vehicle koubei demo`
 - 本地 Web Demo 已通过 Docker Compose 运行：
   - `nginx` 对外监听 `http://127.0.0.1/`
-  - `web/api/worker/postgres/redis` 均能启动
+  - `web/api/worker/postgres/redis` 均为 healthy
   - 本周本地访问口令已设为 `123456`
+- 最新人工回归：
+  - `job_20260427_073149_77861c`
+  - 车型：`风云T9L`
+  - 状态：`completed`
+  - 降级：`false`
+  - 用户已确认：ZIP 下载、AI 一页纸、智能问答审计字段均正常。
 - 项目专用 OpenClaw 已独立部署：
   - profile：`koubei`
   - 本机地址：`http://127.0.0.1:18790/`
@@ -20,6 +25,8 @@
   - LaunchAgent：`ai.openclaw.koubei`
   - 状态目录：`~/.openclaw-koubei`
   - 本地 runtime 目录：`/Users/xyc/Documents/codexwork/openclaw-koubei-runtime/`
+  - 已配置 agent：`main`、`autohome`、`dongchedi`
+  - `autohome`、`dongchedi` 的 auth/model 配置已同步自原 `main` agent；旧 session 已备份清空，runtime workspace 的 `BOOTSTRAP.md` 已移除，避免新 agent 被初始化流程拦截。
 - 云服务器部署清单已写好：`docs/cloud-deployment.md`
 
 ## 已完成能力
@@ -29,13 +36,21 @@
 - 任务进度页已增加汽车之家、懂车帝两个采集阶段独立 0-100 进度条，数据来自各自 `.progress.json`。
 - 车型识别无结果时支持手动填写汽车之家和懂车帝车系编号继续创建任务。
 - 结果页已预留智能一页纸和问答展示入口。
+- 结果页已合并下载入口：一个 ZIP 下载按钮打包 Excel 结果和词云 PNG。
+- 智能问答已改为“任务证据检索 + LLM 生成回答 + 规则兜底”，前端不显示引用证据。
+- 智能问答响应已增加审计字段并在前端展示：
+  - `answer_source`: `llm` 或 `fallback`
+  - `model_used`: 实际使用的 QA 模型
+  - `llm_error`: LLM 未配置、空返回、异常或证据不足原因
+- 前端已完成“车型口碑情报舱”重设计，包含全局任务指挥条、5 步流程导航、双采集 lane、紧凑结果封面、ZIP 交付条和全宽 QA 区。
 - API/worker 已有任务、产物、问答索引和结果读取基础结构。
 - Docker 容器可访问项目专用 OpenClaw gateway。
 - Worker 已有 OpenClaw Gateway adapter：定位为采集阶段执行层，当前本机已启用 `collecting_autohome,collecting_dcd`，并继续由 worker 校验 Excel、validation JSON 和 progress JSON 产物。
+- Worker 已支持阶段级 OpenClaw agent 路由：`collecting_autohome -> agent_id=autohome`，`collecting_dcd -> agent_id=dongchedi`；两边各写自己的 Excel、validation JSON 和 progress JSON，worker 继续统一校验。
 - 六个口碑 skill 已安装到 `koubei` OpenClaw workspace，并被 OpenClaw 识别为 `Ready`：`vehicle-id-finder`、`auto-koubei-collector`、`dcd-koubei-collector`、`koubei-postprocess`、`koubei-keyword-summary`、`koubei-wordcloud`。
 - OpenClaw 装上后的流程已整理在 `docs/openclaw-skill-flow.md`。
-- API 已有 LLM client：OpenAI-compatible 和 Anthropic-compatible messages 均支持；当前本机一页纸报告配置为 DeepSeek V4，走 OpenAI-compatible `/chat/completions`，并对 DeepSeek 启用 JSON response format；失败或返回不合法时保留确定性模板降级。
-- `koubei` OpenClaw profile 默认模型已切到 `minimax-portal/MiniMax-M2.7`，gateway agent 最小调用已返回 `OK`。
+- API 已有 LLM client：OpenAI-compatible 和 Anthropic-compatible messages 均支持；当前本机一页纸报告和智能问答配置为 DeepSeek V4 Flash，走 OpenAI-compatible `/chat/completions`；一页纸对 DeepSeek 启用 JSON response format，失败或返回不合法时保留确定性模板降级。
+- `koubei` OpenClaw profile 默认模型已切回 `minimax-portal/MiniMax-M2.7`，Docker worker 到 gateway 的 WebSocket 握手已验证通过。
 - Nginx 已对 `/api/jobs/<job_id>/progress` 进度轮询端点豁免通用 API 限流，其它 `/api/` 仍保留限流。
 - Worker 写入 Postgres `degraded` Boolean 字段时已改为原生 bool 参数，避免 `smallint -> boolean` 类型错误。
 - Worker 词云阶段已显式传入 `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc`，新验证任务已生成优点/槽点词云 PNG 和词项 Excel。
@@ -46,42 +61,37 @@
 - OpenClaw 是采集阶段的可插拔执行层：只执行 `OPENCLAW_ADAPTER_STAGES` 中显式列出的采集阶段。
 - 未列入 `OPENCLAW_ADAPTER_STAGES` 的阶段继续走原 worker runner，不与 OpenClaw 抢控制权。
 - 当前本机配置已启用 `collecting_autohome,collecting_dcd`；两个采集阶段走 OpenClaw。
+- 两个采集阶段分别投递到不同 OpenClaw agent；如果未配置阶段级 agent ID，则回落到 `OPENCLAW_AGENT_ID`。
 - OpenClaw 长任务采用“提交后轮询产物”模式：Gateway 接单后，worker 等待 expected artifacts，不再同步等待 Gateway 最终响应。
+- Worker 已增加 OpenClaw task DB 状态检查：如果后台 task 已经 `failed/timed_out/cancelled/lost`，不再等满产物超时。
 - 摘要、词云和后处理也已安装在 OpenClaw workspace，但当前流程暂不通过 OpenClaw 执行，继续走 worker。
 
 ## 未完成 / 阻塞点
 
-- LLM 已切换为 DeepSeek V4，API 侧 `HTTPReportLLMClient` 已支持 DeepSeek JSON mode；已用 `job_20260424_070415_0b223b` 的真实摘要产物验证并写入 `job_ai_reports.report_version=llm-v1`。
-- OpenClaw adapter 已接入 worker 入口并在本机启用；真实任务已验证汽车之家采集可产出 Excel、validation JSON 和 progress JSON。
-- OpenClaw gateway 已具备 `operator.write`；云端部署时仍需重新配置 token 和权限。
-- 最新完整验证任务 `job_20260424_073943_6a1aeb` 已进入 `completed`，未降级；采集、后处理、摘要、词云均成功。
-- `dcd-koubei-collector` 已安装到 OpenClaw workspace；真实任务已验证两个采集阶段都通过 OpenClaw 产出文件。
-- OpenClaw agent 执行不会天然写现有进度文件；接入时需要让 message/skill 遵守当前 `.progress.json` 产物 contract。
-- Tavily 未配置：本机未找到有效 `TAVILY_API_KEY`。
+- OpenClaw gateway 已具备 `operator.write`；云端部署时仍需重新配置 token、权限、模型配置和 agent 状态目录。
+- 真实任务已验证两个采集阶段都通过 OpenClaw 产出 Excel、validation JSON 和 progress JSON。
+- OpenClaw agent 执行不会天然写现有进度文件；新 skill 或新阶段接入时需要继续遵守当前 `.progress.json` 产物 contract。
+- Tavily 已配置，车型识别可调用外部搜索；仍建议保留已知车型映射和缓存以降低外部依赖。
 - 云端尚未实际部署：还没有服务器、域名、HTTPS、生产 `.env` 和备份策略落地。
+- 当前只适合小规模多人使用；如果部门多人并发，需要扩展 worker 并发、OpenClaw agent pool、任务排队提示和产物清理策略。
 
 ## 下一步执行顺序
 
-1. 本地回归抽检：
-   - 从网页创建一个新车型任务。
-   - 确认汽车之家、懂车帝两个采集进度条能从 0 推进到 100。
-   - 确认任务状态进入 `completed`，不是 `completed_degraded`。
-2. 验证全部采集阶段 OpenClaw 化：
-   - 已验证两个采集阶段均由 OpenClaw 写出 Excel、validation JSON 和 progress JSON。
-   - 已确认 OpenClaw stdout/stderr 日志生成。
-   - 后处理、摘要、词云仍由 worker 本地执行。
-3. 处理真实采集问题：
+1. 固化当前版本：
+   - 拆分并提交当前本地改动。
+   - 避免提交 `.env`、`storage/jobs`、`.next`、`node_modules`、OpenClaw token 和本地 runtime。
+2. 处理真实采集问题：
    - 如 OpenClaw 阶段失败，优先查看对应阶段的 `*.openclaw.stdout.log` 和 `*.openclaw.stderr.log`。
    - 确认采集 skill 写出的路径与 `OPENCLAW_ARTIFACT_ROOT_HOST`、`ARTIFACT_ROOT` 映射一致。
    - 确认 `.progress.json`、`.validation.json` 和 Excel 均被 worker 校验通过。
-4. 验证真实 LLM：
-   - 已用当前完成任务验证 `ai_report.report_version=llm-v1`。
-   - 确认 DeepSeek 返回的 JSON 能通过 `report_validator`，否则继续降级为 `deterministic-v1`。
-   - 如果模型返回不符合 schema，应确认仍降级为 `deterministic-v1`。
-5. 云端部署：
+3. 云端部署：
    - 按 `docs/cloud-deployment.md` 租服务器并部署。
    - 配置域名、HTTPS、生产口令、密钥、数据库密码和备份。
    - 决定 OpenClaw 在云端是宿主机服务还是独立容器服务。
+4. 多人并发增强：
+   - 增加排队位置和预计等待时间。
+   - 规划 `autohome-*`、`dongchedi-*` agent pool。
+   - 增加单用户并发限制和产物自动清理策略。
 
 ## 常用命令
 
@@ -93,7 +103,7 @@ docker compose logs --tail=200 worker
 docker compose logs --tail=200 api
 npm --prefix apps/web run typecheck
 npm --prefix apps/web run build
-DATABASE_URL='sqlite+pysqlite:////tmp/vehicle-koubei-pytest.db' .venv/bin/pytest apps/api/tests apps/worker/tests -q
+APP_ENV=test DATABASE_URL='sqlite+pysqlite:////tmp/vehicle-koubei-pytest.db' .venv/bin/pytest apps/api/tests apps/worker/tests -q
 ```
 
 ```bash

@@ -17,6 +17,14 @@ OpenClaw workspace path:
 /Users/xyc/Documents/codexwork/openclaw-koubei-runtime/workspace/skills
 ```
 
+Configured local OpenClaw agents:
+
+- `main`: default fallback agent.
+- `autohome`: Autohome collection agent.
+- `dongchedi`: Dongchedi collection agent.
+
+`autohome` and `dongchedi` keep separate session stores for concurrency, but their `auth-profiles.json`, `auth-state.json`, and `models.json` are synced from the original `main` agent. The runtime workspace `BOOTSTRAP.md` must be absent in production collection mode; otherwise new agent sessions can be intercepted by the first-run bootstrap flow instead of executing the collector skill.
+
 ## Runtime Ownership
 
 The Web Demo keeps one pipeline owner:
@@ -25,12 +33,15 @@ The Web Demo keeps one pipeline owner:
 - Worker owns queue execution, stage order, database status, progress aggregation, logs, degraded handling, and artifact validation.
 - OpenClaw owns agent-executed skill stages only when a stage is listed in `OPENCLAW_ADAPTER_STAGES`.
 - The dedicated `koubei` OpenClaw profile currently uses `minimax-portal/MiniMax-M2.7` as its default agent model.
+- Collection is routed to two stage-specific OpenClaw agents: `autohome` only handles Autohome, and `dongchedi` only handles Dongchedi.
 
 Current local setting:
 
 ```text
 OPENCLAW_ADAPTER_ENABLED=true
 OPENCLAW_ADAPTER_STAGES=collecting_autohome,collecting_dcd
+OPENCLAW_AUTOHOME_AGENT_ID=autohome
+OPENCLAW_DCD_AGENT_ID=dongchedi
 ```
 
 This means both collection stages run through OpenClaw. Postprocess, summary, wordcloud, and AI report still run in the worker/API process.
@@ -43,8 +54,8 @@ This means both collection stages run through OpenClaw. Postprocess, summary, wo
 3. User confirms Autohome and Dongchedi candidates.
 4. API creates a job and enqueues worker execution.
 5. Worker builds stage commands and routes configured collection stages through OpenClaw.
-6. OpenClaw runs `auto-koubei-collector` for `collecting_autohome`.
-7. OpenClaw runs `dcd-koubei-collector` for `collecting_dcd`.
+6. Worker submits `collecting_autohome` to OpenClaw `agent_id=autohome`, which runs `auto-koubei-collector`.
+7. Worker submits `collecting_dcd` to OpenClaw `agent_id=dongchedi`, which runs `dcd-koubei-collector`.
 8. Worker waits for expected artifacts from both collectors.
 9. Worker runs `koubei-postprocess` locally to create the dual-platform workbook.
 10. Worker runs `koubei-keyword-summary` locally to create the summary Excel and validation JSON.
@@ -66,7 +77,9 @@ LLM_MODEL_QA=deepseek-v4-flash
 
 The API service uses `HTTPReportLLMClient` and calls `/chat/completions` when `LLM_PROVIDER=deepseek`. It also enables OpenAI-style JSON response format for DeepSeek to reduce invalid JSON fallback. If the provider still fails or returns invalid JSON, the one-page report falls back to the deterministic local report.
 
-OpenClaw itself now uses MiniMax Token Plan:
+The result QA path also uses the same DeepSeek-compatible client through `LLM_MODEL_QA`. It first retrieves relevant chunks from the current summary workbook and AI report, then asks the model to generate a Chinese answer from those chunks only. If the QA model is unavailable or returns an empty answer, the API falls back to the deterministic rule-based answer. The API response keeps `citations` empty so the Web UI does not show source evidence.
+
+OpenClaw itself now uses MiniMax Token Plan for agent-executed collection stages:
 
 ```text
 provider=minimax-portal
@@ -97,11 +110,14 @@ OpenClaw is a stage adapter, not a second orchestrator.
 
 - Add a stage to `OPENCLAW_ADAPTER_STAGES` only when its output contract is stable.
 - Remove a stage from `OPENCLAW_ADAPTER_STAGES` to fall back to the local worker runner.
+- Route `collecting_autohome` with `OPENCLAW_AUTOHOME_AGENT_ID`; route `collecting_dcd` with `OPENCLAW_DCD_AGENT_ID`.
+- If a stage-specific agent ID is unset, the worker falls back to `OPENCLAW_AGENT_ID`.
 - Keep postprocess, summary, wordcloud, and AI report local until there is a reason to move them.
+- Mount OpenClaw state read-only and set `OPENCLAW_TASK_DB_PATH` so the worker can fail fast when an accepted OpenClaw task changes to `failed`, `timed_out`, `cancelled`, or `lost`.
 
 ## Installed Dependency Notes
 
-- `agent-browser` is available on the host and is required by `auto-koubei-collector`.
+- `agent-browser` is available on the host, but the current Autohome production flow primarily uses direct API/detail-page extraction instead of browser-dialog collection.
 - Python dependencies verified on host: `requests`, `openpyxl`, `pandas`, `wordcloud`, `jieba`, `matplotlib`, `PIL`, `yaml`.
 - Node dependency for `vehicle-id-finder`: `playwright` is installed locally under the OpenClaw `vehicle-id-finder` skill directory.
 - Playwright Chromium runtime is installed in the user cache.
