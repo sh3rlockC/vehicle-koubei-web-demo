@@ -114,6 +114,9 @@ export type QaResponse = {
   citations: QaCitation[];
   confidence: string;
   insufficient_evidence: boolean;
+  answer_source: string;
+  model_used: string | null;
+  llm_error: string | null;
   follow_up_suggestions: string[];
 };
 

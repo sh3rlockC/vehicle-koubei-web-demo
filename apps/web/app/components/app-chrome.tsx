@@ -1,0 +1,93 @@
+"use client";
+
+import { usePathname } from "next/navigation";
+import type { ReactNode } from "react";
+import { useEffect, useState } from "react";
+import { getFlowState, type FlowState } from "@/lib/flow-state";
+import { StepRail, stepForPath } from "./ui";
+
+const stageLabels: Record<string, string> = {
+  queued: "排队中",
+  collecting_autohome: "汽车之家采集",
+  collecting_dcd: "懂车帝采集",
+  postprocessing: "汇总整理",
+  summarizing: "摘要生成",
+  rendering_wordcloud: "词云生成",
+  generating_ai_report: "AI 一页纸",
+  building_qa_corpus: "问答索引",
+  completed: "已完成",
+  completed_degraded: "降级完成",
+  failed: "失败",
+  cancelled: "已取消",
+  expired: "已过期",
+};
+
+function shortJobId(jobId: string | null) {
+  if (!jobId) {
+    return "未创建";
+  }
+  return jobId.length > 12 ? `${jobId.slice(0, 8)}...${jobId.slice(-4)}` : jobId;
+}
+
+function currentStageLabel(state: FlowState) {
+  const stage = state.jobProgress?.current_stage;
+  if (!stage) {
+    return state.jobId ? "等待进度" : "未启动";
+  }
+  return stageLabels[stage] ?? stage;
+}
+
+export function AppChrome({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
+  const activeStep = stepForPath(pathname);
+  const [flowState, setLocalFlowState] = useState<FlowState>(() => getFlowState());
+
+  useEffect(() => {
+    const refresh = () => setLocalFlowState(getFlowState());
+    refresh();
+    window.addEventListener("focus", refresh);
+    window.addEventListener("storage", refresh);
+    const intervalId = window.setInterval(refresh, 1600);
+
+    return () => {
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener("storage", refresh);
+      window.clearInterval(intervalId);
+    };
+  }, [pathname]);
+
+  return (
+    <div className="app-shell">
+      <header className="command-bar">
+        <div className="brand-lockup">
+          <p className="eyebrow">VEHICLE KOUBEI INTEL</p>
+          <h1>车型口碑情报舱</h1>
+          <p className="topbar-copy">双平台采集、AI 一页纸、词云和智能问答的内部演示工作台。</p>
+        </div>
+
+        <div className="mission-status" aria-label="当前任务状态">
+          <div>
+            <span>车型</span>
+            <strong>{flowState.vehicleQuery || "待输入"}</strong>
+          </div>
+          <div>
+            <span>任务</span>
+            <strong>{shortJobId(flowState.jobId)}</strong>
+          </div>
+          <div>
+            <span>阶段</span>
+            <strong>{currentStageLabel(flowState)}</strong>
+          </div>
+          <div>
+            <span>访问</span>
+            <strong>{flowState.accessVersion ? "已授权" : "待口令"}</strong>
+          </div>
+        </div>
+      </header>
+
+      <StepRail activeStep={activeStep} />
+
+      <div className="content-stage">{children}</div>
+    </div>
+  );
+}

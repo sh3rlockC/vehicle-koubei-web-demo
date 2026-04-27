@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { SectionHeader, SignalPanel, StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError, toJsonBody } from "@/lib/api";
 import type { CreateJobResponse, PlatformCandidate, SelectedCandidates } from "@/lib/api-types";
 import { getFlowState, setFlowState } from "@/lib/flow-state";
@@ -145,119 +146,146 @@ export default function CandidatesPage() {
   }
 
   return (
-    <main className="panel">
-      <div className="panel-grid">
-        <section className="stack">
-          <p className="eyebrow">第 3 步 / 共 5 步</p>
-          <h2>确认平台车系</h2>
-          <p className="helper">请确认汽车之家和懂车帝的车系。如果自动识别为空，可以手动填写车系编号继续。</p>
+    <main className="page-grid">
+      <SignalPanel tone="accent" className="stack-lg">
+        <SectionHeader
+          eyebrow="第 3 步 / 双平台车系锁定"
+          title="确认平台车系"
+          copy="两个平台的车系都锁定后，worker 会分别投递给 autohome 和 dongchedi 两个采集 agent。"
+        />
 
-          {!hasAutomaticCandidates ? (
-            <div className="card">
-              <h3>自动识别未返回完整候选</h3>
-              <p>当前至少有一个平台没有候选。你可以返回重新输入车型名称，也可以在下方手动填写两个平台的车系编号。</p>
-            </div>
-          ) : null}
+        {!hasAutomaticCandidates ? (
+          <div className="card manual-fallback">
+            <h3>自动识别未返回完整候选</h3>
+            <p>当前至少有一个平台没有候选。可以返回重新输入车型名称，也可以在下方高级校正里手动填写两个平台的车系编号。</p>
+          </div>
+        ) : null}
 
-          <div className="stack">
-            <div className="card">
-              <h3>汽车之家</h3>
-              <div className="stack">
-                {autohomeOptions.length ? autohomeOptions.map((candidate) => {
-                  const selected = candidate.series_id === selectedAutohome?.series_id;
-                  return (
-                    <button
-                      key={`autohome-${candidate.series_id}-${candidate.url}`}
-                      type="button"
-                      className={`card ${selected ? "selected" : ""}`}
-                      onClick={() => setSelectedAutohome(candidate)}
-                    >
-                      <h4>{candidate.title}</h4>
-                      <p>{candidate.note || candidate.source}</p>
-                      <div className="meta-row">
-                        <span className="pill">车系编号 {candidate.series_id}</span>
-                        <span className="pill">{kindLabel(candidate.kind)}</span>
-                      </div>
-                    </button>
-                  );
-                }) : <p className="status-copy">未返回汽车之家候选，请使用下方手动输入。</p>}
+        <div className="platform-grid">
+          <div className="card platform-card">
+            <div className="platform-head">
+              <div>
+                <p className="eyebrow">AUTOHOME</p>
+                <h3 className="platform-title">汽车之家</h3>
               </div>
+              <StatusPill tone={hasCandidate(effectiveAutohome) ? "success" : "warning"}>
+                {hasCandidate(effectiveAutohome) ? "已锁定" : "待选择"}
+              </StatusPill>
             </div>
-
-            <div className="card">
-              <h3>懂车帝</h3>
-              <div className="stack">
-                {dongchediOptions.length ? dongchediOptions.map((candidate) => {
-                  const selected = candidate.series_id === selectedDongchedi?.series_id;
-                  return (
-                    <button
-                      key={`dongchedi-${candidate.series_id}-${candidate.url}`}
-                      type="button"
-                      className={`card ${selected ? "selected" : ""}`}
-                      onClick={() => setSelectedDongchedi(candidate)}
-                    >
-                      <h4>{candidate.title}</h4>
-                      <p>{candidate.note || candidate.source}</p>
-                      <div className="meta-row">
-                        <span className="pill">车系编号 {candidate.series_id}</span>
-                        <span className="pill">{kindLabel(candidate.kind)}</span>
-                      </div>
-                    </button>
-                  );
-                }) : <p className="status-copy">未返回懂车帝候选，请使用下方手动输入。</p>}
-              </div>
+            <div className="candidate-list">
+              {autohomeOptions.length ? autohomeOptions.map((candidate) => {
+                const selected = candidate.series_id === selectedAutohome?.series_id;
+                return (
+                  <button
+                    key={`autohome-${candidate.series_id}-${candidate.url}`}
+                    type="button"
+                    className={`card candidate-card ${selected ? "selected" : ""}`}
+                    onClick={() => setSelectedAutohome(candidate)}
+                  >
+                    <h4>{candidate.title}</h4>
+                    <p>{candidate.note || candidate.source}</p>
+                    <div className="meta-row">
+                      <StatusPill>车系编号 {candidate.series_id}</StatusPill>
+                      <StatusPill tone={candidate.kind === "best" ? "success" : "default"}>
+                        {kindLabel(candidate.kind)}
+                      </StatusPill>
+                    </div>
+                  </button>
+                );
+              }) : <p className="status-copy">未返回汽车之家候选，请使用高级校正手动输入。</p>}
             </div>
           </div>
 
-          <div className="card">
-            <h3>手动兜底</h3>
-            <p className="status-copy">自动识别失败时，填写两个平台的车系编号也可以继续创建任务。</p>
-            <div className="stack">
-              <div className="field">
-                <label htmlFor="manual-autohome">汽车之家车系编号</label>
-                <input
-                  id="manual-autohome"
-                  value={manualAutohomeId}
-                  onChange={(event) => {
-                    setManualAutohomeId(event.target.value);
-                    setSelectedAutohome(null);
-                  }}
-                  placeholder="例如：8089"
-                />
+          <div className="card platform-card">
+            <div className="platform-head">
+              <div>
+                <p className="eyebrow">DONGCHEDI</p>
+                <h3 className="platform-title">懂车帝</h3>
               </div>
-              <div className="field">
-                <label htmlFor="manual-dongchedi">懂车帝车系编号</label>
-                <input
-                  id="manual-dongchedi"
-                  value={manualDongchediId}
-                  onChange={(event) => {
-                    setManualDongchediId(event.target.value);
-                    setSelectedDongchedi(null);
-                  }}
-                  placeholder="例如：25398"
-                />
-              </div>
+              <StatusPill tone={hasCandidate(effectiveDongchedi) ? "success" : "warning"}>
+                {hasCandidate(effectiveDongchedi) ? "已锁定" : "待选择"}
+              </StatusPill>
+            </div>
+            <div className="candidate-list">
+              {dongchediOptions.length ? dongchediOptions.map((candidate) => {
+                const selected = candidate.series_id === selectedDongchedi?.series_id;
+                return (
+                  <button
+                    key={`dongchedi-${candidate.series_id}-${candidate.url}`}
+                    type="button"
+                    className={`card candidate-card ${selected ? "selected" : ""}`}
+                    onClick={() => setSelectedDongchedi(candidate)}
+                  >
+                    <h4>{candidate.title}</h4>
+                    <p>{candidate.note || candidate.source}</p>
+                    <div className="meta-row">
+                      <StatusPill>车系编号 {candidate.series_id}</StatusPill>
+                      <StatusPill tone={candidate.kind === "best" ? "success" : "default"}>
+                        {kindLabel(candidate.kind)}
+                      </StatusPill>
+                    </div>
+                  </button>
+                );
+              }) : <p className="status-copy">未返回懂车帝候选，请使用高级校正手动输入。</p>}
             </div>
           </div>
+        </div>
 
-          {error ? <p className="error">{error}</p> : null}
-
-          <div className="actions">
-            <button
-              className="button"
-              type="button"
-              disabled={loading || !hasCandidate(effectiveAutohome) || !hasCandidate(effectiveDongchedi)}
-              onClick={handleCreateJob}
-            >
-              {loading ? "正在创建任务..." : "创建任务"}
-            </button>
+        <details className="card manual-fallback">
+          <summary>高级校正：手动填写车系编号</summary>
+          <p className="status-copy" style={{ marginTop: 10 }}>
+            自动识别失败或候选不准时，填写两个平台的车系编号也可以继续创建任务。
+          </p>
+          <div className="split-grid" style={{ marginTop: 16 }}>
+            <div className="field">
+              <label htmlFor="manual-autohome">汽车之家车系编号</label>
+              <input
+                id="manual-autohome"
+                value={manualAutohomeId}
+                onChange={(event) => {
+                  setManualAutohomeId(event.target.value);
+                  setSelectedAutohome(null);
+                }}
+                placeholder="例如：8089"
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="manual-dongchedi">懂车帝车系编号</label>
+              <input
+                id="manual-dongchedi"
+                value={manualDongchediId}
+                onChange={(event) => {
+                  setManualDongchediId(event.target.value);
+                  setSelectedDongchedi(null);
+                }}
+                placeholder="例如：25398"
+              />
+            </div>
           </div>
-        </section>
+        </details>
 
-        <aside className="card">
+        {error ? <p className="error">{error}</p> : null}
+
+        <div className="actions">
+          <button
+            className="button"
+            type="button"
+            disabled={loading || !hasCandidate(effectiveAutohome) || !hasCandidate(effectiveDongchedi)}
+            onClick={handleCreateJob}
+          >
+            {loading ? "正在创建采集任务" : "启动双源采集"}
+          </button>
+          <Link className="button secondary" href="/vehicle">
+            返回车型输入
+          </Link>
+        </div>
+      </SignalPanel>
+
+      <aside className="stack">
+        <div className="card">
           <h3>已识别车型</h3>
           <p className="status-copy">{resolved.query}</p>
-          <div className="timeline">
+          <div className="timeline" style={{ marginTop: 16 }}>
             <div className="timeline-item">
               <span className="timeline-dot" />
               <div>
@@ -273,8 +301,17 @@ export default function CandidatesPage() {
               </div>
             </div>
           </div>
-        </aside>
-      </div>
+        </div>
+
+        <div className="card">
+          <h3>创建任务前检查</h3>
+          <p className="status-copy">只有两个平台都锁定后才会创建 job，避免一个平台空跑或采集错车系。</p>
+          <div className="meta-row" style={{ marginTop: 14 }}>
+            <StatusPill tone={hasCandidate(effectiveAutohome) ? "success" : "warning"}>汽车之家</StatusPill>
+            <StatusPill tone={hasCandidate(effectiveDongchedi) ? "success" : "warning"}>懂车帝</StatusPill>
+          </div>
+        </div>
+      </aside>
     </main>
   );
 }

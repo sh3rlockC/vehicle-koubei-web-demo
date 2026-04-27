@@ -4,9 +4,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
+import { SectionHeader, SignalPanel, StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError, toJsonBody } from "@/lib/api";
 import type { VehicleResolveResponse } from "@/lib/api-types";
 import { getFlowState, setFlowState } from "@/lib/flow-state";
+
+const exampleVehicles = ["风云T11", "风云X3L", "风云T9L", "QQ3"];
 
 export default function VehiclePage() {
   const router = useRouter();
@@ -82,48 +85,80 @@ export default function VehiclePage() {
   }
 
   return (
-    <main className="panel">
-      <div className="panel-grid">
-        <section className="stack">
-          <p className="eyebrow">第 2 步 / 共 5 步</p>
-          <h2>输入车型名称</h2>
-          <p className="helper">系统会尝试识别汽车之家和懂车帝的车系候选，下一步由你确认。</p>
+    <main className="page-grid">
+      <SignalPanel tone="accent" className="stack-lg">
+        <SectionHeader
+          eyebrow="第 2 步 / 任务启动台"
+          title="输入车型名称"
+          copy="系统会先锁定汽车之家和懂车帝的车系 ID，确认后再投递给两个采集 agent。"
+        />
 
-          <form className="stack" onSubmit={handleSubmit}>
-            <div className="field">
-              <label htmlFor="query">车型名称</label>
-              <input
-                id="query"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="海鸥"
-              />
-              <p className="field-hint">如果自动识别没有结果，下一步可以手动填写两个平台的车系编号。</p>
-            </div>
+        <form className="stack" onSubmit={handleSubmit}>
+          <div className="field hero-input">
+            <label htmlFor="query">车型名称</label>
+            <input
+              id="query"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="输入车型，例如 风云T11"
+            />
+            <p className="field-hint">已确认过的车型会优先复用缓存；识别失败时下一步可以手动填写平台车系编号。</p>
+          </div>
 
-            {error ? <p className="error">{error}</p> : null}
-
-            <div className="actions">
-              <button className="button" type="submit" disabled={loading || !query.trim()}>
-                {loading ? "正在识别..." : "进入候选确认"}
+          <div className="quick-actions" aria-label="示例车型">
+            {exampleVehicles.map((vehicle) => (
+              <button key={vehicle} className="quick-chip" type="button" onClick={() => setQuery(vehicle)}>
+                {vehicle}
               </button>
-            </div>
-          </form>
-        </section>
+            ))}
+          </div>
 
-        <aside className="card">
-          <h3>当前流程</h3>
-          <p className="status-copy">候选结果只保存在当前浏览器会话中，不会作为公开列表展示。</p>
-          <div className="meta-row">
-            <span className="pill">后端识别</span>
-            <span className="pill">会话口令</span>
-            <span className="pill">支持手动兜底</span>
+          {error ? <p className="error">{error}</p> : null}
+
+          <div className="actions">
+            <button className="button" type="submit" disabled={loading || !query.trim()}>
+              {loading ? "正在识别车系" : "进入车系确认"}
+            </button>
           </div>
-          <div style={{ marginTop: 16 }}>
-            <p className="field-hint">上一次查询：{flowState.vehicleQuery || "暂无"}</p>
+        </form>
+      </SignalPanel>
+
+      <aside className="stack">
+        <div className="card">
+          <h3>本次任务会执行什么</h3>
+          <div className="timeline">
+            <div className="timeline-item">
+              <span className="timeline-dot" />
+              <p>搜索并解析汽车之家车系 ID。</p>
+            </div>
+            <div className="timeline-item">
+              <span className="timeline-dot" />
+              <p>搜索并解析懂车帝车系 ID。</p>
+            </div>
+            <div className="timeline-item">
+              <span className="timeline-dot" />
+              <p>确认后由两个 agent 分别采集口碑数据。</p>
+            </div>
+            <div className="timeline-item">
+              <span className="timeline-dot" />
+              <p>生成 Excel、词云、智能一页纸和问答上下文。</p>
+            </div>
           </div>
-        </aside>
-      </div>
+        </div>
+
+        <div className="card">
+          <h3>当前会话</h3>
+          <p className="status-copy">候选结果只保存在当前浏览器会话，不会作为公开车型库展示。</p>
+          <div className="meta-row" style={{ marginTop: 14 }}>
+            <StatusPill>后端识别</StatusPill>
+            <StatusPill tone="success">会话口令</StatusPill>
+            <StatusPill tone="accent">支持手动兜底</StatusPill>
+          </div>
+          <p className="field-hint" style={{ marginTop: 14 }}>
+            上一次查询：{flowState.vehicleQuery || "暂无"}
+          </p>
+        </div>
+      </aside>
     </main>
   );
 }

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
+import { SignalPanel, StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError, toJsonBody } from "@/lib/api";
 import type { JobResultResponse, QaResponse } from "@/lib/api-types";
 import { clearFlowState, getFlowState } from "@/lib/flow-state";
@@ -15,33 +16,62 @@ const statusLabels: Record<string, string> = {
   expired: "已过期",
 };
 
-const artifactLabels: Record<string, string> = {
-  summary_excel: "摘要表格",
-  wordcloud_terms_excel: "词云词项清单",
-  wordcloud_positive: "优点词云",
-  wordcloud_negative: "槽点词云",
-  validation_json: "校验结果",
-  image_png: "图片",
-  excel: "表格文件",
-  file: "文件",
-};
-
 const confidenceLabels: Record<string, string> = {
   high: "高",
   medium: "中",
   low: "低",
 };
 
-const sourceTypeLabels: Record<string, string> = {
-  overview: "总览摘要",
-  business: "综合业务摘要",
-  compare: "跨平台对比",
-  opportunity: "产品机会点",
-  one_pager: "一页纸",
+const answerSourceLabels: Record<string, string> = {
+  llm: "LLM 生成",
+  fallback: "规则兜底",
 };
 
 function labelFor(value: string, labels: Record<string, string>) {
   return labels[value] ?? value;
+}
+
+function asText(value: unknown, fallback = "") {
+  if (typeof value === "string" && value.trim()) {
+    return value;
+  }
+  if (typeof value === "number") {
+    return String(value);
+  }
+  return fallback;
+}
+
+function reportText(report: Record<string, unknown> | null, keys: string[], fallback = "") {
+  if (!report) {
+    return fallback;
+  }
+
+  for (const key of keys) {
+    const text = asText(report[key]);
+    if (text) {
+      return text;
+    }
+  }
+
+  return fallback;
+}
+
+function reportList(report: Record<string, unknown> | null, keys: string[], fallback: string[]) {
+  if (!report) {
+    return fallback;
+  }
+
+  for (const key of keys) {
+    const value = report[key];
+    if (Array.isArray(value)) {
+      const items = value.map((item) => asText(item)).filter(Boolean);
+      if (items.length) {
+        return items;
+      }
+    }
+  }
+
+  return fallback;
 }
 
 export default function ResultPage() {
@@ -172,52 +202,138 @@ export default function ResultPage() {
     return <main className="panel guard">正在加载结果...</main>;
   }
 
+  const resultBundleUrl = `/api/jobs/${result.job_id}/artifacts.zip`;
+  const downloadableCount = result.artifacts.filter((artifact) =>
+    artifact.path.toLowerCase().endsWith(".xlsx") || artifact.path.toLowerCase().endsWith(".png")
+  ).length;
+  const vehicleName = flowState.vehicleQuery || result.template_report.title || "当前车型";
+  const totalSamples = result.sample_summary.autohome_count + result.sample_summary.dcd_count;
+  const aiHeadline = reportText(result.ai_report, ["headline", "title"], "智能一页纸");
+  const executiveSummary = reportText(
+    result.ai_report,
+    ["executive_summary", "summary", "conclusion"],
+    "当前任务已完成采集与结构化处理，可继续查看模板摘要、下载结果包或围绕当前结果提问。"
+  );
+  const bossBrief = reportList(
+    result.ai_report,
+    ["boss_brief", "key_findings", "findings", "highlights"],
+    result.template_report.highlights.slice(0, 4)
+  );
+  const actionItems = reportList(result.ai_report, ["action_items", "recommendations", "next_steps"], []);
+
   return (
-    <main className="panel">
-      <div className="panel-grid">
-        <section className="stack">
-          <p className="eyebrow">第 5 步 / 共 5 步</p>
-          <h2>任务结果</h2>
-          <p className="helper">这里展示摘要、一页纸、词云产物和基于当前结果的问答。</p>
+    <main className="result-page">
+      <section className={`result-cover ${result.degraded ? "result-cover-warning" : ""}`}>
+        <div className="result-cover-copy">
+          <p className="eyebrow">第 5 步 / 洞察交付台</p>
+          <h2>{vehicleName} 口碑洞察包</h2>
+          <p>
+            双平台采集已汇总为一份可下载的结果包，并生成可追问的 AI 业务解读。这里优先呈现结论、样本量和交付物。
+          </p>
+          <div className="meta-row">
+            <StatusPill tone={result.degraded ? "warning" : "success"}>
+              {labelFor(result.status, statusLabels)}
+            </StatusPill>
+            <StatusPill tone={result.ai_available ? "success" : "warning"}>
+              AI 一页纸：{result.ai_available ? "可用" : "降级"}
+            </StatusPill>
+            <StatusPill tone={result.qa_available ? "success" : "warning"}>
+              问答：{result.qa_available ? "已启用" : "未启用"}
+            </StatusPill>
+          </div>
+        </div>
 
-          {result.ai_report ? (
-            <div className="card">
-              <div className="meta-row">
-                <span className="pill">智能一页纸</span>
-                <span className="pill">{result.ai_available ? "可用" : "降级"}</span>
+        <div className="result-cover-board">
+          <div className="result-summary-grid" aria-label="任务结果摘要">
+            <div className="result-summary-card featured">
+              <span>样本总量</span>
+              <strong>{totalSamples}</strong>
+              <small>条车主口碑</small>
+            </div>
+            <div className="result-summary-card">
+              <span>汽车之家</span>
+              <strong>{result.sample_summary.autohome_count}</strong>
+              <small>对齐口碑</small>
+            </div>
+            <div className="result-summary-card">
+              <span>懂车帝</span>
+              <strong>{result.sample_summary.dcd_count}</strong>
+              <small>口碑样本</small>
+            </div>
+            <div className="result-summary-card">
+              <span>可下载文件</span>
+              <strong>{downloadableCount}</strong>
+              <small>Excel / 词云</small>
+            </div>
+          </div>
+          <div className="download-card compact-download-card">
+            <div>
+              <strong>交付物已打包</strong>
+              <p>Excel、词云图片和词云词项清单。</p>
+            </div>
+            {downloadableCount ? (
+              <a className="download-link primary-download" href={resultBundleUrl}>
+                下载全部结果 ZIP
+              </a>
+            ) : (
+              <p className="status-copy">暂无可打包下载的结果文件。</p>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section className="insight-layout">
+        <article className="executive-report">
+          <div className="report-kicker">
+            <StatusPill tone="accent">智能一页纸</StatusPill>
+            <StatusPill>{result.model_name}</StatusPill>
+          </div>
+          <h3>{aiHeadline}</h3>
+          <p className="executive-summary">{executiveSummary}</p>
+
+          <div className="brief-grid">
+            {bossBrief.map((item, index) => (
+              <div key={`${item}-${index}`} className="brief-card">
+                <span>{String(index + 1).padStart(2, "0")}</span>
+                <p>{item}</p>
               </div>
-              <h3>{String(result.ai_report.headline ?? "智能报告")}</h3>
-              {"executive_summary" in result.ai_report ? (
-                <p>{String(result.ai_report.executive_summary ?? "")}</p>
-              ) : null}
-
-              {Array.isArray(result.ai_report.boss_brief) && result.ai_report.boss_brief.length ? (
-                <div className="timeline" style={{ marginTop: 16 }}>
-                  {result.ai_report.boss_brief.map((item) => (
-                    <div key={String(item)} className="timeline-item">
-                      <span className="timeline-dot" />
-                      <p>{String(item)}</p>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-
-          <div className="card">
-            <div className="meta-row">
-              <span className="pill">{labelFor(result.status, statusLabels)}</span>
-              <span className="pill">{result.degraded ? "部分降级" : "完整完成"}</span>
-              <span className="pill">{result.model_name}</span>
-            </div>
-            <h3>样本概览</h3>
-            <p>
-              汽车之家：{result.sample_summary.autohome_count} 条 · 懂车帝：{" "}
-              {result.sample_summary.dcd_count}
-            </p>
+            ))}
           </div>
 
-          <div className="card">
+          {actionItems.length ? (
+            <div className="action-strip">
+              <h4>建议动作</h4>
+              {actionItems.slice(0, 4).map((item) => (
+                <p key={item}>{item}</p>
+              ))}
+            </div>
+          ) : null}
+        </article>
+
+        <aside className="artifact-column">
+          <div className="artifact-card">
+            <h3>结构化产物</h3>
+            <div className="artifact-matrix">
+              <div>
+                <span>总览摘要</span>
+                <strong>{result.structured_sections.overview.length}</strong>
+              </div>
+              <div>
+                <span>跨平台对比</span>
+                <strong>{result.structured_sections.compare.length}</strong>
+              </div>
+              <div>
+                <span>业务摘要</span>
+                <strong>{result.structured_sections.business.length}</strong>
+              </div>
+              <div>
+                <span>机会点</span>
+                <strong>{result.structured_sections.opportunities.length}</strong>
+              </div>
+            </div>
+          </div>
+
+          <div className="artifact-card template-card">
             <h3>{result.template_report.title || "模板一页纸"}</h3>
             <div className="timeline">
               {result.template_report.highlights.map((item) => (
@@ -229,129 +345,115 @@ export default function ResultPage() {
             </div>
           </div>
 
-          <div className="card">
-            <h3>结构化结果</h3>
-            <div className="stack">
-              <p className="field-hint">总览摘要：{result.structured_sections.overview.length} 行</p>
-              <p className="field-hint">跨平台对比：{result.structured_sections.compare.length} 行</p>
-              <p className="field-hint">综合业务摘要：{result.structured_sections.business.length} 行</p>
-              <p className="field-hint">
-                产品机会点：{result.structured_sections.opportunities.length} 行
-              </p>
-            </div>
+          <div className="artifact-card wordcloud-card">
+            <h3>词云预览</h3>
+            {result.wordcloud.positive_image_url || result.wordcloud.negative_image_url ? (
+              <div className="wordcloud-preview">
+                {result.wordcloud.positive_image_url ? (
+                  <img src={result.wordcloud.positive_image_url} alt="优点词云" />
+                ) : null}
+                {result.wordcloud.negative_image_url ? (
+                  <img src={result.wordcloud.negative_image_url} alt="槽点词云" />
+                ) : null}
+              </div>
+            ) : (
+              <p className="status-copy">当前结果未返回词云图片预览。</p>
+            )}
           </div>
-        </section>
+        </aside>
+      </section>
 
-        <aside className="stack">
-          <div className="card">
-            <h3>词云产物</h3>
-            <p className="field-hint">
-              优点词云：{result.wordcloud.positive_image_url || "暂不可用"}
-            </p>
-            <p className="field-hint">
-              槽点词云：{result.wordcloud.negative_image_url || "暂不可用"}
-            </p>
-            <p className="field-hint">
-              词项清单：{result.wordcloud.terms_excel_url || "暂不可用"}
-            </p>
-          </div>
+      <div className="result-actions">
+        <div>
+          <p className="eyebrow">NEXT</p>
+          <h3>继续追问，或重新发起下一辆车</h3>
+        </div>
+        <div className="actions">
+          {downloadableCount ? (
+            <a className="button" href={resultBundleUrl}>
+              下载结果包
+            </a>
+          ) : null}
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => {
+                clearFlowState();
+                window.location.href = "/passphrase";
+              }}
+            >
+              重新开始
+            </button>
+        </div>
+      </div>
 
-          <div className="card">
-            <h3>文件产物</h3>
-            <div className="timeline">
-              {result.artifacts.map((artifact) => (
-                <div key={artifact.id} className="timeline-item">
-                  <span className="timeline-dot" />
-                  <div>
-                    <strong>{labelFor(artifact.type, artifactLabels)}</strong>
-                    <p>{artifact.path}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="card">
+      <SignalPanel tone="accent" className="qa-panel">
+        <div className="qa-header">
+          <div>
             <div className="meta-row">
-              <span className="pill">智能问答</span>
-              <span className="pill">{result.qa_available ? "已启用" : "未启用"}</span>
+              <StatusPill tone="accent">智能问答</StatusPill>
+              <StatusPill tone={result.qa_available ? "success" : "warning"}>
+                {result.qa_available ? "已启用" : "未启用"}
+              </StatusPill>
             </div>
-            <p className="field-hint">智能一页纸：{result.ai_available ? "可用" : "不可用"}</p>
-            <p className="field-hint">结果问答：{result.qa_available ? "可用" : "暂不可用"}</p>
-            {!result.qa_available ? (
-              <p className="status-copy">
-                当前结果还没有问答索引，问题输入会暂时禁用。
-              </p>
-            ) : null}
+            <h3>围绕当前任务提问</h3>
+            <p className="status-copy">回答由当前任务摘要和智能一页纸提供上下文，不显示引用证据。</p>
+          </div>
+        </div>
 
-            <form className="stack" onSubmit={handleQaSubmit} style={{ marginTop: 16 }}>
-              <div className="field">
-                <label htmlFor="qa-question">提出问题</label>
-                <input
-                  id="qa-question"
-                  value={qaQuestion}
-                  onChange={(event) => {
-                    setQaQuestion(event.target.value);
-                    if (qaError) {
-                      setQaError("");
-                    }
-                  }}
-                  placeholder="例如：这款车的主要槽点集中在哪些方面？"
-                  disabled={!result.qa_available || qaLoading}
-                />
-                <p className="field-hint">
-                  只会围绕当前任务的摘要和证据回答，不会引入外部资料。
-                </p>
-              </div>
+        <div className="qa-layout">
+          <form className="stack" onSubmit={handleQaSubmit}>
+            <div className="field">
+              <label htmlFor="qa-question">提出问题</label>
+              <input
+                id="qa-question"
+                value={qaQuestion}
+                onChange={(event) => {
+                  setQaQuestion(event.target.value);
+                  if (qaError) {
+                    setQaError("");
+                  }
+                }}
+                placeholder="例如：这款车的主要槽点集中在哪些方面？"
+                disabled={!result.qa_available || qaLoading}
+              />
+              <p className="field-hint">建议问卖点、槽点、平台差异、产品动作或老板汇报。</p>
+            </div>
 
-              {qaError ? <p className="error">{qaError}</p> : null}
-              {qaLoading ? <p className="status-copy">正在生成基于证据的回答...</p> : null}
+            {qaError ? <p className="error">{qaError}</p> : null}
+            {qaLoading ? <p className="status-copy">正在生成回答...</p> : null}
 
-              <div className="actions">
-                <button
-                  className="button"
-                  type="submit"
-                  disabled={!result.qa_available || qaLoading || !qaQuestion.trim()}
-                >
-                  {qaLoading ? "正在提问..." : "提交问题"}
-                </button>
-              </div>
-            </form>
+            <div className="actions">
+              <button
+                className="button"
+                type="submit"
+                disabled={!result.qa_available || qaLoading || !qaQuestion.trim()}
+              >
+                {qaLoading ? "正在提问" : "提交问题"}
+              </button>
+            </div>
+          </form>
 
+          <div className="qa-result">
             {qaResult ? (
-              <div className="stack" style={{ marginTop: 16 }}>
+              <>
                 <div className="meta-row">
-                  <span className="pill">置信度：{labelFor(qaResult.confidence, confidenceLabels)}</span>
-                  <span className="pill">{qaResult.insufficient_evidence ? "证据不足" : "有证据支撑"}</span>
+                  <StatusPill>置信度：{labelFor(qaResult.confidence, confidenceLabels)}</StatusPill>
+                  <StatusPill tone={qaResult.answer_source === "llm" ? "success" : "warning"}>
+                    来源：{labelFor(qaResult.answer_source, answerSourceLabels)}
+                  </StatusPill>
+                  {qaResult.model_used ? <StatusPill>模型：{qaResult.model_used}</StatusPill> : null}
+                  <StatusPill tone={qaResult.insufficient_evidence ? "warning" : "success"}>
+                    {qaResult.insufficient_evidence ? "证据不足" : "有证据支撑"}
+                  </StatusPill>
+                  {qaResult.llm_error ? <StatusPill tone="warning">LLM：{qaResult.llm_error}</StatusPill> : null}
                 </div>
-                <div className="card">
+                <div className="qa-answer-box">
                   <h4>回答</h4>
-                  <p>{qaResult.answer}</p>
+                  <p className="qa-answer">{qaResult.answer}</p>
                 </div>
 
-                <div className="card">
-                  <h4>引用证据</h4>
-                  <div className="stack">
-                    {qaResult.citations.length ? (
-                      qaResult.citations.map((citation) => (
-                        <div key={`${citation.chunk_id}-${citation.source_type}`} className="card">
-                          <div className="meta-row">
-                            <span className="pill">{labelFor(citation.source_type, sourceTypeLabels)}</span>
-                            <span className="pill">{citation.chunk_id}</span>
-                          </div>
-                          <p>{citation.text}</p>
-                          <p className="field-hint" style={{ whiteSpace: "pre-wrap" }}>
-                            {JSON.stringify(citation.metadata, null, 2)}
-                          </p>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="status-copy">这次回答没有返回引用证据。</p>
-                    )}
-                  </div>
-                </div>
-
-                <div className="card">
+                <div className="qa-followups">
                   <h4>追问建议</h4>
                   <div className="actions">
                     {qaResult.follow_up_suggestions.length ? (
@@ -374,24 +476,16 @@ export default function ResultPage() {
                     )}
                   </div>
                 </div>
+              </>
+            ) : (
+              <div className="qa-answer-box muted-box">
+                <h4>等待提问</h4>
+                <p className="status-copy">提交问题后，这里会显示完整回答，不会截断为省略号。</p>
               </div>
-            ) : null}
+            )}
           </div>
-
-          <div className="actions">
-            <button
-              className="button secondary"
-              type="button"
-              onClick={() => {
-                clearFlowState();
-                window.location.href = "/passphrase";
-              }}
-            >
-              重新开始
-            </button>
-          </div>
-        </aside>
-      </div>
+        </div>
+      </SignalPanel>
     </main>
   );
 }

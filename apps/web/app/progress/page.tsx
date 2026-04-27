@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { SectionHeader, SignalPanel, StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError } from "@/lib/api";
 import type { JobProgressResponse } from "@/lib/api-types";
 import { getFlowState, setFlowState } from "@/lib/flow-state";
@@ -37,6 +38,14 @@ const statusLabels: Record<string, string> = {
   completed_degraded: "降级完成",
 };
 
+const pipelineStages = [
+  "postprocessing",
+  "summarizing",
+  "rendering_wordcloud",
+  "generating_ai_report",
+  "building_qa_corpus",
+];
+
 function labelFor(value: string, labels: Record<string, string>) {
   return labels[value] ?? value;
 }
@@ -45,11 +54,40 @@ function collectionStage(current: JobProgressResponse | null | undefined, name: 
   const stage = current?.stages.find((item) => item.name === name);
   const percent = Math.max(0, Math.min(100, stage?.progress_percent ?? (stage?.status === "success" ? 100 : 0)));
   return {
+    name,
     label: labelFor(name, stageLabels),
+    agentId: name === "collecting_autohome" ? "autohome" : "dongchedi",
     status: stage?.status ?? "waiting",
     percent,
-    message: stage?.progress_message || (stage ? `第 ${stage.attempt_no} 次尝试` : "等待前置阶段完成"),
+    attemptNo: stage?.attempt_no ?? 0,
+    message: stage?.progress_message || (stage ? `第 ${stage.attempt_no} 次尝试` : "已投递/等待 agent 响应"),
   };
+}
+
+function stageSummary(current: JobProgressResponse | null | undefined, name: string) {
+  const stage = current?.stages.find((item) => item.name === name);
+  return {
+    name,
+    label: labelFor(name, stageLabels),
+    status: stage?.status ?? "waiting",
+    message: stage?.progress_message || stage?.error_message || "等待上游产物",
+  };
+}
+
+function statusTone(status: string): "default" | "success" | "warning" | "danger" | "accent" {
+  if (["success", "completed"].includes(status)) {
+    return "success";
+  }
+  if (["retrying", "degraded", "queued", "waiting"].includes(status)) {
+    return "warning";
+  }
+  if (["failed", "cancelled", "expired"].includes(status)) {
+    return "danger";
+  }
+  if (status === "running") {
+    return "accent";
+  }
+  return "default";
 }
 
 export default function ProgressPage() {
@@ -139,63 +177,88 @@ export default function ProgressPage() {
     collectionStage(current, "collecting_dcd"),
   ];
 
+  const pipelineProgress = pipelineStages.map((stageName) => stageSummary(current, stageName));
+
   return (
-    <main className="panel">
-      <p className="eyebrow">第 4 步 / 共 5 步</p>
-      <h2>任务执行进度</h2>
-      <p className="helper">系统会自动刷新采集、汇总、摘要、词云和大模型解读的执行状态。</p>
+    <main className="stack-lg">
+      <SignalPanel tone="accent" className="stack-lg">
+        <SectionHeader
+          eyebrow="第 4 步 / 双源采集中"
+          title="任务执行进度"
+          copy="系统会自动刷新两个采集 agent、汇总、摘要、词云、一页纸和问答索引的执行状态。"
+        />
 
-      {error ? <p className="error">{error}</p> : null}
+        {error ? <p className="error">{error}</p> : null}
 
-      <div className="stack">
-        <div className="bar" aria-hidden="true">
-          <span style={{ width: `${current?.overall_percent ?? 0}%` }} />
+        <div className="stack">
+          <div className="bar" aria-hidden="true">
+            <span style={{ width: `${current?.overall_percent ?? 0}%` }} />
+          </div>
+          <div className="meta-row">
+            <StatusPill tone={statusTone(current?.status ?? "waiting")}>
+              {current ? `${current.overall_percent}%` : "等待进度"}
+            </StatusPill>
+            <StatusPill>{current ? labelFor(current.status, statusLabels) : "未返回状态"}</StatusPill>
+            <StatusPill tone="accent">
+              {current ? labelFor(current.current_stage, stageLabels) : "等待第一条进度"}
+            </StatusPill>
+          </div>
+          <p className="status-copy">{current?.message || "后端进度会显示在这里。"}</p>
         </div>
-        <p className="status-copy">
-          {current
-            ? `${current.overall_percent}% · ${labelFor(current.status, statusLabels)} · ${labelFor(current.current_stage, stageLabels)}`
-            : "正在等待第一条进度..."}
-        </p>
 
         <div className="collector-grid">
           {collectionProgress.map((stage) => (
-            <section key={stage.label} className="collector-card" aria-label={`${stage.label}进度`}>
+            <SignalPanel key={stage.name} className="collector-card" tone={statusTone(stage.status)} aria-label={`${stage.label}进度`}>
               <div className="collector-head">
                 <div>
+                  <p className="eyebrow">AGENT_ID={stage.agentId}</p>
                   <h3>{stage.label}</h3>
-                  <p>{labelFor(stage.status, statusLabels)}</p>
+                  <p>{labelFor(stage.status, statusLabels)} · 第 {stage.attemptNo || 1} 次尝试</p>
                 </div>
                 <strong>{stage.percent}%</strong>
               </div>
-              <div className="collector-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={stage.percent}>
+              <div
+                className="collector-bar"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={stage.percent}
+              >
                 <span style={{ width: `${stage.percent}%` }} />
               </div>
               <p className="collector-message">{stage.message}</p>
-            </section>
+            </SignalPanel>
           ))}
         </div>
+      </SignalPanel>
 
-        <div className="card">
-          <h3>当前说明</h3>
-          <p>{current?.message || "后端进度会显示在这里。"}</p>
-        </div>
-
-        <div className="card">
-          <h3>阶段明细</h3>
-          <div className="timeline">
-            {(current?.stages ?? []).map((stage) => (
-              <div key={`${stage.name}-${stage.attempt_no}`} className="timeline-item">
-                <span className="timeline-dot" />
-                <div>
-                  <strong>
-                    {labelFor(stage.name, stageLabels)} · {labelFor(stage.status, statusLabels)}
-                  </strong>
-                  <p>第 {stage.attempt_no} 次尝试</p>
-                  {stage.error_message ? <p className="error">{stage.error_message}</p> : null}
-                </div>
-              </div>
-            ))}
+      <div className="pipeline-strip">
+        {pipelineProgress.map((stage) => (
+          <div key={stage.name} className="pipeline-node">
+            <strong>{stage.label}</strong>
+            <StatusPill tone={statusTone(stage.status)}>{labelFor(stage.status, statusLabels)}</StatusPill>
+            <p className="field-hint" style={{ marginTop: 10 }}>
+              {stage.message}
+            </p>
           </div>
+        ))}
+      </div>
+
+      <div className="card">
+        <h3>阶段明细</h3>
+        <div className="timeline">
+          {(current?.stages ?? []).map((stage) => (
+            <div key={`${stage.name}-${stage.attempt_no}`} className="timeline-item">
+              <span className="timeline-dot" />
+              <div>
+                <strong>
+                  {labelFor(stage.name, stageLabels)} · {labelFor(stage.status, statusLabels)}
+                </strong>
+                <p className="status-copy">第 {stage.attempt_no} 次尝试</p>
+                {stage.error_message ? <p className="error">{stage.error_message}</p> : null}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </main>
