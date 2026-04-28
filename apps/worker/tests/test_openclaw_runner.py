@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import platform
 import sqlite3
 import sys
 import threading
@@ -12,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import worker_app.openclaw_runner as openclaw_runner
 from worker_app.artifacts import ensure_job_dirs
 from worker_app.jobs import StageResult
 from worker_app.openclaw_runner import OpenClawSettings, build_stage_runner, run_autohome_via_openclaw, run_collector_via_openclaw
@@ -119,6 +123,65 @@ def test_openclaw_settings_reads_stage_specific_agent_ids_from_env(monkeypatch: 
     assert settings.agent_id_for_stage("collecting_autohome") == "autohome"
     assert settings.agent_id_for_stage("collecting_dcd") == "dongchedi"
     assert settings.agent_id_for_stage("summarizing") == "main"
+
+
+def test_openclaw_gateway_connect_sends_device_identity_when_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity_path = tmp_path / "identity" / "device.json"
+    identity_path.parent.mkdir(parents=True)
+    identity_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "deviceId": "device-1",
+                "publicKeyPem": "PUBLIC KEY",
+                "privateKeyPem": "PRIVATE KEY",
+            }
+        ),
+        encoding="utf-8",
+    )
+    signed_payloads: list[str] = []
+
+    def fake_sign(_private_key_pem: str, payload: str) -> str:
+        signed_payloads.append(payload)
+        return "signed-payload"
+
+    monkeypatch.setattr(openclaw_runner, "_sign_device_payload", fake_sign, raising=False)
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+            self.responses = [
+                json.dumps({"type": "event", "event": "connect.challenge", "payload": {"nonce": "nonce-1"}}),
+            ]
+
+        async def recv(self) -> str:
+            return self.responses.pop(0)
+
+        async def send(self, raw: str) -> None:
+            frame = json.loads(raw)
+            self.sent.append(frame)
+            self.responses.append(json.dumps({"type": "res", "id": frame["id"], "ok": True, "payload": {}}))
+
+    websocket = FakeWebSocket()
+    settings = OpenClawSettings()
+    object.__setattr__(settings, "device_identity_file", str(identity_path))
+
+    asyncio.run(openclaw_runner.OpenClawGatewayClient()._connect(websocket, settings=settings, token="gateway-token"))
+
+    connect_params = websocket.sent[0]["params"]
+    assert connect_params["auth"] == {"token": "gateway-token"}
+    assert connect_params["scopes"] == ["operator.write"]
+    assert connect_params["device"]["id"] == "device-1"
+    assert connect_params["device"]["publicKey"] == "PUBLIC KEY"
+    assert connect_params["device"]["signature"] == "signed-payload"
+    assert connect_params["device"]["nonce"] == "nonce-1"
+    assert isinstance(connect_params["device"]["signedAt"], int)
+    assert signed_payloads == [
+        f"v3|device-1|gateway-client|backend|operator|operator.write|{connect_params['device']['signedAt']}|gateway-token|nonce-1|{platform.system().lower()}|"
+    ]
 
 
 def test_run_collectors_route_to_stage_specific_openclaw_agents(tmp_path: Path) -> None:

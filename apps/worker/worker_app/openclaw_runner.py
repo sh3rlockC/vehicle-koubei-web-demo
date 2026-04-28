@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import platform
 import sqlite3
+import subprocess
 import time
+import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +37,7 @@ class OpenClawSettings:
     artifact_root_container: str = "/srv/koubei/jobs"
     artifact_root_host: str | None = None
     task_db_path: str | None = None
+    device_identity_file: str = "/openclaw-state/identity/device.json"
 
     @classmethod
     def from_env(cls) -> "OpenClawSettings":
@@ -52,6 +56,7 @@ class OpenClawSettings:
             artifact_root_container=os.getenv("ARTIFACT_ROOT", cls.artifact_root_container),
             artifact_root_host=os.getenv("OPENCLAW_ARTIFACT_ROOT_HOST") or None,
             task_db_path=os.getenv("OPENCLAW_TASK_DB_PATH") or None,
+            device_identity_file=os.getenv("OPENCLAW_DEVICE_IDENTITY_FILE", cls.device_identity_file),
         )
 
     def agent_id_for_stage(self, stage_name: str) -> str:
@@ -94,6 +99,96 @@ def _env_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
         return default
     values = tuple(item.strip() for item in raw.split(",") if item.strip())
     return values or default
+
+
+def _base64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _read_device_identity(identity_file: str) -> dict[str, str] | None:
+    path = Path(identity_file)
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if raw.get("version") != 1:
+        return None
+    device_id = raw.get("deviceId")
+    public_key_pem = raw.get("publicKeyPem")
+    private_key_pem = raw.get("privateKeyPem")
+    if not all(isinstance(value, str) and value.strip() for value in (device_id, public_key_pem, private_key_pem)):
+        return None
+    return {
+        "device_id": device_id,
+        "public_key_pem": public_key_pem,
+        "private_key_pem": private_key_pem,
+    }
+
+
+def _sign_device_payload(private_key_pem: str, payload: str) -> str:
+    key_path: Path | None = None
+    payload_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as key_file:
+            key_file.write(private_key_pem)
+            key_path = Path(key_file.name)
+        with tempfile.NamedTemporaryFile("wb", delete=False) as payload_file:
+            payload_file.write(payload.encode("utf-8"))
+            payload_path = Path(payload_file.name)
+        signature = subprocess.check_output(
+            ["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(key_path), "-in", str(payload_path)],
+            stderr=subprocess.DEVNULL,
+        )
+    finally:
+        if key_path is not None:
+            key_path.unlink(missing_ok=True)
+        if payload_path is not None:
+            payload_path.unlink(missing_ok=True)
+    return _base64url(signature)
+
+
+def _build_device_auth(
+    *,
+    settings: OpenClawSettings,
+    token: str,
+    nonce: str,
+    role: str,
+    scopes: list[str],
+    client_id: str,
+    client_mode: str,
+    client_platform: str,
+    device_family: str = "",
+) -> dict[str, Any] | None:
+    identity = _read_device_identity(settings.device_identity_file)
+    if identity is None:
+        return None
+
+    signed_at = int(time.time() * 1000)
+    payload = "|".join(
+        [
+            "v3",
+            identity["device_id"],
+            client_id,
+            client_mode,
+            role,
+            ",".join(scopes),
+            str(signed_at),
+            token,
+            nonce,
+            client_platform,
+            device_family,
+        ]
+    )
+    signature = _sign_device_payload(identity["private_key_pem"], payload)
+    return {
+        "id": identity["device_id"],
+        "publicKey": identity["public_key_pem"],
+        "signature": signature,
+        "signedAt": signed_at,
+        "nonce": nonce,
+    }
 
 
 def _command_arg(command: StageCommand, option: str) -> str:
@@ -403,7 +498,22 @@ class OpenClawGatewayClient:
             )
 
     async def _connect(self, websocket, *, settings: OpenClawSettings, token: str) -> None:
-        await self._wait_connect_challenge(websocket)
+        nonce = await self._wait_connect_challenge(websocket)
+        role = "operator"
+        scopes = ["operator.write"]
+        client_id = "gateway-client"
+        client_mode = "backend"
+        client_platform = platform.system().lower()
+        device = _build_device_auth(
+            settings=settings,
+            token=token,
+            nonce=nonce,
+            role=role,
+            scopes=scopes,
+            client_id=client_id,
+            client_mode=client_mode,
+            client_platform=client_platform,
+        )
         await self._request(
             websocket,
             method="connect",
@@ -411,27 +521,35 @@ class OpenClawGatewayClient:
                 "minProtocol": 3,
                 "maxProtocol": 3,
                 "client": {
-                    "id": "gateway-client",
+                    "id": client_id,
                     "displayName": "vehicle-koubei-worker",
                     "version": "0.1.0",
-                    "platform": platform.system().lower(),
-                    "mode": "backend",
+                    "platform": client_platform,
+                    "mode": client_mode,
                     "instanceId": str(uuid.uuid4()),
                 },
                 "caps": [],
                 "auth": {"token": token},
-                "role": "operator",
-                "scopes": ["operator.write"],
+                "role": role,
+                "scopes": scopes,
+                **({"device": device} if device else {}),
             },
             timeout_seconds=min(settings.timeout_seconds, 30),
         )
 
-    async def _wait_connect_challenge(self, websocket) -> None:
+    async def _wait_connect_challenge(self, websocket) -> str:
         while True:
             raw = await asyncio.wait_for(websocket.recv(), timeout=10)
             frame = json.loads(raw)
             if frame.get("type") == "event" and frame.get("event") == "connect.challenge":
-                return
+                nonce = (frame.get("payload") or {}).get("nonce")
+                if isinstance(nonce, str) and nonce.strip():
+                    return nonce.strip()
+                raise StageExecutionError(
+                    stage="openclaw",
+                    error_code="OPENCLAW_ERROR",
+                    message="OpenClaw connect challenge missing nonce",
+                )
 
     async def _request(
         self,
