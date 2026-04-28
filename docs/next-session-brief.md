@@ -1,5 +1,12 @@
 # 车型口碑 Web Demo 下一步交接卡
 
+> 2026-04-28 后续接手请优先阅读：
+>
+> - `docs/project-handoff-checklist.md`
+> - `docs/project-0-to-1-retrospective.md`
+>
+> 本文件保留早期交接上下文，部分状态已被上述新文档覆盖。
+
 更新时间：2026-04-27
 
 ## 当前可用状态
