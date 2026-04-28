@@ -4,7 +4,7 @@ WORKDIR /app
 
 COPY apps/web/package.json /app/package.json
 COPY apps/web/package-lock.json /app/package-lock.json
-RUN npm ci
+RUN npm config set registry https://registry.npmmirror.com && npm ci
 
 COPY apps/web /app
 
