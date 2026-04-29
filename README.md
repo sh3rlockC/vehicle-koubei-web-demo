@@ -149,6 +149,9 @@ Worker 仍是唯一总编排层，负责：
 - [`docs/project-handoff-checklist.md`](docs/project-handoff-checklist.md)
 - [`docs/project-0-to-1-retrospective.md`](docs/project-0-to-1-retrospective.md)
 - [`docs/next-session-brief.md`](docs/next-session-brief.md)
+- [`docs/worktree-workflow.md`](docs/worktree-workflow.md)
+
+推荐把本仓库主目录作为长期稳定工作树，新增功能通过 sibling Git worktree 开发，避免单个对话上下文过重或污染主工作树。
 
 ## 安全说明
 
@@ -156,4 +159,3 @@ Worker 仍是唯一总编排层，负责：
 - 公开仓库前应检查 Git 历史中是否存在真实密钥。
 - 生产环境应使用强随机 `SESSION_SECRET` 和独立数据库密码。
 - OpenClaw gateway 建议只允许本机或内网访问，不直接暴露公网。
-

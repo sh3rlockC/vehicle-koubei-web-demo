@@ -4,8 +4,9 @@
 >
 > - `docs/project-handoff-checklist.md`
 > - `docs/project-0-to-1-retrospective.md`
+> - `docs/worktree-workflow.md`
 >
-> 本文件保留早期交接上下文，部分状态已被上述新文档覆盖。
+> 本文件保留早期交接上下文，部分状态已被上述新文档覆盖。后续新增功能应优先在独立 worktree 中进行，主工作树仅作为稳定入口和部署基线。
 
 更新时间：2026-04-27
 
@@ -13,6 +14,8 @@
 
 - 分支：`main`
 - remote：`origin https://github.com/sh3rlockC/vehicle-koubei-web-demo.git`
+- 主工作树：`/Users/xyc/Documents/codexwork/vehicle-koubei-web-demo`
+- 功能 worktree 根目录：`/Users/xyc/Documents/codexwork/vehicle-koubei-web-demo-worktrees`
 - 最近关键提交：
   - `1dafe31 Initial vehicle koubei demo`
 - 本地 Web Demo 已通过 Docker Compose 运行：
