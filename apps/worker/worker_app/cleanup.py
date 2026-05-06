@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import multiprocessing
 import os
 from pathlib import Path
 import shutil
 import threading
-import time
 from typing import Mapping
 
 from sqlalchemy import bindparam, create_engine, text
@@ -70,7 +70,10 @@ def _safe_job_dir(artifact_root: str | Path, job_id: str) -> Path | None:
 def _remove_job_dir(artifact_root: str | Path, job_id: str) -> None:
     job_dir = _safe_job_dir(artifact_root, job_id)
     if job_dir is not None and job_dir.exists():
-        shutil.rmtree(job_dir)
+        try:
+            shutil.rmtree(job_dir)
+        except FileNotFoundError:
+            pass
 
 
 def cleanup_expired_job_data(
@@ -84,40 +87,43 @@ def cleanup_expired_job_data(
     cutoff = now - timedelta(days=retention_days)
     engine = create_engine(database_url, future=True, **_engine_kwargs(database_url))
 
-    with engine.begin() as conn:
-        rows = conn.execute(
-            text(
-                """
-                SELECT job_id, created_at, finished_at
-                FROM jobs
-                WHERE status IN :statuses
-                ORDER BY COALESCE(finished_at, created_at), job_id
-                """
-            ).bindparams(bindparam("statuses", expanding=True)),
-            {"statuses": TERMINAL_CLEANUP_STATUSES},
-        ).mappings().all()
-
-        expired_job_ids = []
-        for row in rows:
-            finished_or_created = _as_utc_datetime(row["finished_at"]) or _as_utc_datetime(row["created_at"])
-            if finished_or_created is not None and finished_or_created <= cutoff:
-                expired_job_ids.append(str(row["job_id"]))
-
-        for job_id in expired_job_ids:
-            _remove_job_dir(artifact_root, job_id)
-            for table_name in ("job_artifacts", "job_ai_reports", "job_qa_chunks"):
-                conn.execute(text(f"DELETE FROM {table_name} WHERE job_id = :job_id"), {"job_id": job_id})
-            conn.execute(
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(
                 text(
                     """
-                    UPDATE jobs
-                    SET status = 'expired',
-                        current_stage = 'expired'
-                    WHERE job_id = :job_id
+                    SELECT job_id, created_at, finished_at
+                    FROM jobs
+                    WHERE status IN :statuses
+                    ORDER BY COALESCE(finished_at, created_at), job_id
                     """
-                ),
-                {"job_id": job_id},
-            )
+                ).bindparams(bindparam("statuses", expanding=True)),
+                {"statuses": TERMINAL_CLEANUP_STATUSES},
+            ).mappings().all()
+
+            expired_job_ids = []
+            for row in rows:
+                finished_or_created = _as_utc_datetime(row["finished_at"]) or _as_utc_datetime(row["created_at"])
+                if finished_or_created is not None and finished_or_created <= cutoff:
+                    expired_job_ids.append(str(row["job_id"]))
+
+            for job_id in expired_job_ids:
+                _remove_job_dir(artifact_root, job_id)
+                for table_name in ("job_artifacts", "job_ai_reports", "job_qa_chunks"):
+                    conn.execute(text(f"DELETE FROM {table_name} WHERE job_id = :job_id"), {"job_id": job_id})
+                conn.execute(
+                    text(
+                        """
+                        UPDATE jobs
+                        SET status = 'expired',
+                            current_stage = 'expired'
+                        WHERE job_id = :job_id
+                        """
+                    ),
+                    {"job_id": job_id},
+                )
+    finally:
+        engine.dispose()
 
     return CleanupResult(expired_job_ids=expired_job_ids)
 
@@ -144,8 +150,8 @@ def run_cleanup_loop(
         stop_event.wait(settings.interval_seconds)
 
 
-def start_cleanup_thread(*, database_url: str, artifact_root: str | Path, settings: CleanupSettings) -> threading.Thread:
-    thread = threading.Thread(
+def start_cleanup_process(*, database_url: str, artifact_root: str | Path, settings: CleanupSettings) -> multiprocessing.Process:
+    process = multiprocessing.Process(
         target=run_cleanup_loop,
         kwargs={
             "database_url": database_url,
@@ -155,5 +161,5 @@ def start_cleanup_thread(*, database_url: str, artifact_root: str | Path, settin
         name="job-artifact-cleanup",
         daemon=True,
     )
-    thread.start()
-    return thread
+    process.start()
+    return process

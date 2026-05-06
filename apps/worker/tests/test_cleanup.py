@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from worker_app.cleanup import cleanup_expired_job_data, cleanup_settings_from_env
+from worker_app.cleanup import cleanup_expired_job_data, cleanup_settings_from_env, start_cleanup_process
 import worker as worker_module
 
 
@@ -234,7 +234,46 @@ def test_cleanup_settings_default_to_three_days_and_twelve_hours(monkeypatch) ->
     assert settings.interval_seconds == 12 * 60 * 60
 
 
-def test_worker_main_starts_cleanup_thread_with_environment_settings(monkeypatch, tmp_path: Path) -> None:
+def test_start_cleanup_process_uses_daemon_process(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        def __init__(self, *, target, kwargs, name: str, daemon: bool):
+            captured["target"] = target
+            captured["kwargs"] = kwargs
+            captured["name"] = name
+            captured["daemon"] = daemon
+            captured["started"] = False
+
+        def start(self):
+            captured["started"] = True
+
+    monkeypatch.setattr("worker_app.cleanup.multiprocessing.Process", FakeProcess)
+    settings = cleanup_settings_from_env(
+        {
+            "JOB_ARTIFACT_RETENTION_DAYS": "3",
+            "JOB_ARTIFACT_CLEANUP_INTERVAL_SECONDS": "43200",
+        }
+    )
+
+    process = start_cleanup_process(
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'cleanup.db'}",
+        artifact_root=tmp_path / "jobs",
+        settings=settings,
+    )
+
+    assert process is not None
+    assert captured["name"] == "job-artifact-cleanup"
+    assert captured["daemon"] is True
+    assert captured["started"] is True
+    assert captured["kwargs"] == {
+        "database_url": f"sqlite+pysqlite:///{tmp_path / 'cleanup.db'}",
+        "artifact_root": tmp_path / "jobs",
+        "settings": settings,
+    }
+
+
+def test_worker_main_starts_cleanup_process_with_environment_settings(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
     class FakeWorker:
@@ -245,7 +284,7 @@ def test_worker_main_starts_cleanup_thread_with_environment_settings(monkeypatch
         def work(self, *, with_scheduler: bool):
             captured["with_scheduler"] = with_scheduler
 
-    def fake_start_cleanup_thread(*, database_url: str, artifact_root: str, settings):
+    def fake_start_cleanup_process(*, database_url: str, artifact_root: str, settings):
         captured["database_url"] = database_url
         captured["artifact_root"] = artifact_root
         captured["retention_days"] = settings.retention_days
@@ -258,7 +297,7 @@ def test_worker_main_starts_cleanup_thread_with_environment_settings(monkeypatch
     monkeypatch.setenv("JOB_ARTIFACT_RETENTION_DAYS", "5")
     monkeypatch.setenv("JOB_ARTIFACT_CLEANUP_INTERVAL_SECONDS", "60")
     monkeypatch.setattr(worker_module, "make_redis_connection", lambda redis_url: f"connection:{redis_url}")
-    monkeypatch.setattr(worker_module, "start_cleanup_thread", fake_start_cleanup_thread)
+    monkeypatch.setattr(worker_module, "start_cleanup_process", fake_start_cleanup_process)
     monkeypatch.setattr(worker_module, "Worker", FakeWorker)
 
     assert worker_module.main() == 0
