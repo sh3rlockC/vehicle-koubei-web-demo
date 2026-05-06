@@ -128,7 +128,7 @@ collecting_dcd      -> agent_id=dongchedi -> dcd-koubei-collector
 Worker 仍是唯一总编排层，负责：
 
 - 队列执行
-- 过期任务产物清理
+- 过期任务产物清理，清理循环以独立后台进程运行，不参与 RQ job fork 执行
 - 阶段状态
 - 进度聚合
 - 日志记录
@@ -142,7 +142,7 @@ Worker 仍是唯一总编排层，负责：
 ## 当前已知限制
 
 - 车型识别会优先复用服务器已确认车系 ID；如果误确认过错误 ID，仍需通过手动填写校正。
-- 服务器默认每 12 小时清理一次超过 3 天的任务评论产物，结果页会提示用户及时下载 ZIP。
+- 服务器默认每 12 小时清理一次超过 3 天的任务评论产物，worker 启动后会先扫描一次，结果页会提示用户及时下载 ZIP。
 - OpenClaw task `succeeded` 不等于业务采集成功，必须校验 Excel、validation JSON 和 progress JSON。
 - 单平台降级结果页和词云兼容仍需继续增强。
 - 多人并发时建议增加 agent pool、任务排队提示和产物清理策略。
