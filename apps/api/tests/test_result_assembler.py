@@ -24,7 +24,7 @@ class FakeQueue:
         raise AssertionError("queue should not be used in result tests")
 
 
-def make_client(tmp_path: Path) -> TestClient:
+def make_client(tmp_path: Path, *, raise_server_exceptions: bool = True) -> TestClient:
     settings = Settings(
         app_env="test",
         database_url=f"sqlite+pysqlite:///{tmp_path / 'result.db'}",
@@ -36,11 +36,12 @@ def make_client(tmp_path: Path) -> TestClient:
     )
     app = create_app(settings)
     app.dependency_overrides[get_job_queue] = lambda: FakeQueue()
-    return TestClient(app)
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 
 
-def seed_result_job(job_id: str) -> None:
+def seed_result_job(job_id: str, *, term_excel_path: Path | None = None) -> None:
     fixture_root = Path("/Users/xyc/Documents/codexwork/data/26.4.7/风云X3 PLUS")
+    term_excel_path = term_excel_path or fixture_root / "风云X3 PLUS_词云词项清单.xlsx"
     session = get_session_local()()
     try:
         job = Job(
@@ -77,7 +78,7 @@ def seed_result_job(job_id: str) -> None:
                 JobArtifact(
                     job_id=job_id,
                     artifact_type="excel",
-                    artifact_path=str(fixture_root / "风云X3 PLUS_词云词项清单.xlsx"),
+                    artifact_path=str(term_excel_path),
                     source_stage="rendering_wordcloud",
                 ),
             ]
@@ -153,6 +154,23 @@ def test_result_endpoint_returns_expired_job_without_artifacts(tmp_path: Path) -
     assert payload["retention_days"] == 3
 
 
+def test_result_endpoint_ignores_unreadable_wordcloud_terms(tmp_path: Path) -> None:
+    broken_terms = tmp_path / "broken_词云词项清单.xlsx"
+    broken_terms.write_text("not an xlsx", encoding="utf-8")
+    client = make_client(tmp_path, raise_server_exceptions=False)
+    seed_result_job("job_broken_terms_result", term_excel_path=broken_terms)
+
+    verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify.status_code == 200
+
+    response = client.get("/api/jobs/job_broken_terms_result/result")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["template_report"]["title"] == "双平台口碑一页纸总结"
+    assert payload["wordcloud"]["keyword_rankings"] == {"positive": [], "negative": [], "combined": []}
+
+
 def test_artifact_download_serves_file(tmp_path: Path) -> None:
     client = make_client(tmp_path)
     seed_result_job("job_download")
@@ -194,3 +212,54 @@ def test_result_zip_download_bundles_excel_and_wordcloud_files(tmp_path: Path) -
     assert "keyword_rank_negative.png" in names
     assert "keyword_rank_combined.png" in names
     assert all(content.startswith(b"\x89PNG\r\n\x1a\n") for content in rank_pngs.values())
+
+
+def test_result_zip_download_skips_keyword_pngs_when_terms_excel_is_unreadable(tmp_path: Path) -> None:
+    broken_terms = tmp_path / "broken_词云词项清单.xlsx"
+    broken_terms.write_text("not an xlsx", encoding="utf-8")
+    client = make_client(tmp_path, raise_server_exceptions=False)
+    seed_result_job("job_broken_terms_zip", term_excel_path=broken_terms)
+
+    verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify.status_code == 200
+
+    response = client.get("/api/jobs/job_broken_terms_zip/artifacts.zip")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        names = set(archive.namelist())
+
+    assert "风云X3 PLUS_双平台口碑摘要.xlsx" in names
+    assert "风云X3 PLUS_优点词云.png" in names
+    assert "风云X3 PLUS_槽点词云.png" in names
+    assert "broken_词云词项清单.xlsx" in names
+    assert "keyword_rank_positive.png" not in names
+    assert "keyword_rank_negative.png" not in names
+    assert "keyword_rank_combined.png" not in names
+
+
+def test_result_zip_download_skips_keyword_pngs_when_rendering_fails(monkeypatch, tmp_path: Path) -> None:
+    def fail_render(_rankings):
+        raise RuntimeError("png render failed")
+
+    monkeypatch.setattr("app.routes.jobs.build_keyword_rank_pngs", fail_render)
+    client = make_client(tmp_path, raise_server_exceptions=False)
+    seed_result_job("job_rank_render_failed")
+
+    verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify.status_code == 200
+
+    response = client.get("/api/jobs/job_rank_render_failed/artifacts.zip")
+
+    assert response.status_code == 200
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        names = set(archive.namelist())
+
+    assert "风云X3 PLUS_双平台口碑摘要.xlsx" in names
+    assert "风云X3 PLUS_优点词云.png" in names
+    assert "风云X3 PLUS_槽点词云.png" in names
+    assert "风云X3 PLUS_词云词项清单.xlsx" in names
+    assert "keyword_rank_positive.png" not in names
+    assert "keyword_rank_negative.png" not in names
+    assert "keyword_rank_combined.png" not in names
