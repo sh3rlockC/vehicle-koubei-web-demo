@@ -26,6 +26,7 @@ from app.schemas import (
     JobResultResponse,
     StageStatusItem,
 )
+from app.services.confirmed_vehicle_series import upsert_confirmed_vehicle_series
 from app.services.job_queue import get_job_queue
 from app.services.passphrase import require_passphrase_session
 from app.services.qa_service import answer_job_question, find_summary_artifact
@@ -145,6 +146,14 @@ def create_job(
                 selected=True,
             ),
         ]
+    )
+    upsert_confirmed_vehicle_series(
+        db,
+        query=payload.query,
+        selected_candidates={
+            "autohome": selected_autohome,
+            "dongchedi": selected_dongchedi,
+        },
     )
 
     queued_stage = JobStageRun(

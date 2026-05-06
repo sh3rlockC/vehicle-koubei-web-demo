@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError as RedisConnectionError
+from sqlalchemy import text
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -149,6 +150,57 @@ def test_jobs_require_session_and_can_be_queried(tmp_path: Path) -> None:
     assert progress_payload["overall_percent"] == 5
     assert progress_payload["stages"][0]["name"] == "queued"
     assert progress_payload["stages"][0]["status"] == "queued"
+
+
+def test_create_job_persists_confirmed_series_ids_separately(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path)
+    verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify_response.status_code == 200
+
+    create_response = client.post(
+        "/api/jobs",
+        json={
+            "query": "风云X3 PLUS",
+            "selected_candidates": {
+                "autohome": {
+                    "series_id": "8089",
+                    "url": "https://k.autohome.com.cn/8089?dimensionid=10&order=0&yearid=0#listcontainer",
+                    "title": "风云X3 PLUS",
+                    "source": "fixture",
+                },
+                "dongchedi": {
+                    "series_id": "25398",
+                    "url": "https://www.dongchedi.com/auto/series/25398",
+                    "title": "风云X3 PLUS",
+                    "source": "fixture",
+                },
+            },
+        },
+    )
+    assert create_response.status_code == 200
+
+    session = get_session_local()()
+    try:
+        rows = session.execute(
+            text(
+                """
+                SELECT query_key, query, platform, series_id, title, url, source
+                FROM confirmed_vehicle_series
+                ORDER BY platform
+                """
+            )
+        ).mappings().all()
+    finally:
+        session.close()
+
+    assert [row["platform"] for row in rows] == ["autohome", "dongchedi"]
+    assert {row["platform"]: row["series_id"] for row in rows} == {"autohome": "8089", "dongchedi": "25398"}
+    assert {row["platform"]: row["query_key"] for row in rows} == {
+        "autohome": "风云x3 plus",
+        "dongchedi": "风云x3 plus",
+    }
+    assert all(row["query"] == "风云X3 PLUS" for row in rows)
+    assert rows[0]["title"] == "风云X3 PLUS"
 
 
 def test_create_job_returns_service_unavailable_when_queue_backend_is_down(tmp_path: Path) -> None:

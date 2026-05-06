@@ -206,3 +206,83 @@ def test_vehicle_resolver_reuses_cached_result(tmp_path: Path) -> None:
 
     assert first == second
     assert sorted(calls) == ["autohome", "dongchedi"]
+
+
+def test_vehicle_resolver_prefers_confirmed_series_store(tmp_path: Path) -> None:
+    manifest = write_vehicle_finder_manifest(tmp_path)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'confirmed.db'}", future=True)
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS confirmed_vehicle_series (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query_key TEXT NOT NULL,
+                query TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                series_id TEXT NOT NULL,
+                url TEXT,
+                title TEXT,
+                source TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO confirmed_vehicle_series (
+                query_key, query, platform, series_id, url, title, source, created_at, updated_at
+            ) VALUES
+                (
+                    '风云x3 plus',
+                    '风云X3 PLUS',
+                    'autohome',
+                    '8089',
+                    'https://k.autohome.com.cn/8089/',
+                    '风云X3 PLUS',
+                    'fixture',
+                    datetime('now'),
+                    datetime('now')
+                ),
+                (
+                    '风云x3 plus',
+                    '风云X3 PLUS',
+                    'dongchedi',
+                    '25398',
+                    'https://www.dongchedi.com/auto/series/25398',
+                    '风云X3 PLUS',
+                    'fixture',
+                    datetime('now'),
+                    datetime('now')
+                )
+            """
+        )
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
+    calls: list[str] = []
+
+    class FallbackRunner:
+        def run_json(self, cmd: list[str], *, cwd=None, timeout: int = 60) -> dict:
+            site = cmd[cmd.index("--site") + 1]
+            calls.append(site)
+            return vehicle_payload(site, "风云X3 PLUS")
+
+    try:
+        resolver = VehicleResolver(
+            manifest_path=manifest,
+            tool_runner=FallbackRunner(),
+            settings=make_service_settings(tmp_path),
+            db=db,
+        )
+
+        result = resolver.resolve("  风云X3 PLUS  ")
+    finally:
+        db.close()
+
+    assert calls == []
+    assert result["query"] == "风云X3 PLUS"
+    assert result["autohome"]["best"]["series_id"] == "8089"
+    assert result["autohome"]["best"]["kind"] == "confirmed"
+    assert result["dongchedi"]["best"]["series_id"] == "25398"
+    assert result["dongchedi"]["best"]["kind"] == "confirmed"

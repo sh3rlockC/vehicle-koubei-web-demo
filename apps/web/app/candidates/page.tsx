@@ -32,6 +32,9 @@ function kindLabel(kind: string | null | undefined) {
   if (kind === "manual") {
     return "手动";
   }
+  if (kind === "confirmed") {
+    return "已确认";
+  }
   if (kind === "best") {
     return "最佳匹配";
   }

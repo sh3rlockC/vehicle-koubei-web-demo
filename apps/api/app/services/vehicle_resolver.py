@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
@@ -9,6 +8,7 @@ from typing import Any
 
 from app.config import Settings, get_settings
 from app.models import VehicleResolveCache
+from app.services.confirmed_vehicle_series import PLATFORMS, confirmed_vehicle_series_payload, query_key
 from app.services.dependencies import discover_manifest_path, load_dependency_map
 from app.services.tool_runner import ToolRunner
 
@@ -16,9 +16,6 @@ try:
     from sqlalchemy.orm import Session
 except ImportError:  # pragma: no cover
     Session = Any  # type: ignore[misc,assignment]
-
-
-PLATFORMS = ("autohome", "dongchedi")
 
 
 def _utc_now() -> datetime:
@@ -29,10 +26,6 @@ def _as_aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
-
-
-def _query_key(query: str) -> str:
-    return re.sub(r"\s+", " ", query).strip().lower()
 
 
 class VehicleResolver:
@@ -153,7 +146,11 @@ class VehicleResolver:
 
     def resolve(self, query: str) -> dict[str, Any]:
         normalized_query = query.strip()
-        key = _query_key(normalized_query)
+        confirmed = confirmed_vehicle_series_payload(self.db, normalized_query)
+        if confirmed is not None:
+            return confirmed
+
+        key = query_key(normalized_query)
         cached = self._cached_payload(key)
         if cached is not None:
             return cached

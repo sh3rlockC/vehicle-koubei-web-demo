@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -55,6 +55,22 @@ class JobCandidate(Base):
     selected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     job: Mapped[Job] = relationship(back_populates="candidates")
+
+
+class ConfirmedVehicleSeries(Base):
+    __tablename__ = "confirmed_vehicle_series"
+    __table_args__ = (UniqueConstraint("query_key", "platform", name="uq_confirmed_vehicle_series_query_platform"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    query_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    query: Mapped[str] = mapped_column(String(255), nullable=False)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    series_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 
 class JobStageRun(Base):
