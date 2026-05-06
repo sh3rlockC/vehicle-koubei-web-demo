@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Literal
@@ -7,6 +8,7 @@ from typing import Literal
 from openpyxl import load_workbook
 
 KeywordDirection = Literal["positive", "negative"]
+logger = logging.getLogger(__name__)
 
 
 def _empty_keyword_rankings() -> dict[str, list[dict[str, int | str]]]:
@@ -149,6 +151,14 @@ def read_wordcloud_terms_workbook(path: str | Path, *, limit: int = 10) -> dict[
         if rankings["positive"] or rankings["negative"] or rankings["combined"]:
             return rankings
     return _rankings_from_terms_sheets(workbook, limit=limit)
+
+
+def read_wordcloud_terms_workbook_or_empty(path: str | Path, *, limit: int = 10) -> dict[str, list[dict[str, int | str]]]:
+    try:
+        return read_wordcloud_terms_workbook(path, limit=limit)
+    except Exception as exc:
+        logger.warning("failed to read wordcloud terms workbook %s: %s", path, exc)
+        return _empty_keyword_rankings()
 
 
 def read_summary_workbook(path: str | Path) -> dict:

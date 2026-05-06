@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 import json
+import logging
 from pathlib import Path
 from urllib.parse import quote
 import zipfile
@@ -31,10 +32,11 @@ from app.services.job_queue import get_job_queue
 from app.services.keyword_rank_images import build_keyword_rank_pngs
 from app.services.passphrase import require_passphrase_session
 from app.services.qa_service import answer_job_question, find_summary_artifact
-from app.services.result_reader import read_wordcloud_terms_workbook
+from app.services.result_reader import read_wordcloud_terms_workbook_or_empty
 from app.services.result_assembler import assemble_job_result
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+logger = logging.getLogger(__name__)
 QUEUE_UNAVAILABLE_MESSAGE = "任务队列暂不可用，请确认 Redis 和 worker 已启动。"
 
 
@@ -388,11 +390,15 @@ def download_result_bundle(
             None,
         )
         if term_path:
-            rankings = read_wordcloud_terms_workbook(term_path)
-            for filename, content in build_keyword_rank_pngs(rankings):
-                if filename not in seen_names:
-                    seen_names.add(filename)
-                    archive.writestr(filename, content)
+            rankings = read_wordcloud_terms_workbook_or_empty(term_path)
+            if any(rankings.values()):
+                try:
+                    for filename, content in build_keyword_rank_pngs(rankings):
+                        if filename not in seen_names:
+                            seen_names.add(filename)
+                            archive.writestr(filename, content)
+                except Exception as exc:
+                    logger.warning("failed to render keyword rank pngs for job %s: %s", job_id, exc)
 
     filename = f"{job.model_name}_全部结果.zip"
     encoded_filename = quote(filename)
