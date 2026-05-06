@@ -148,7 +148,7 @@ export default function VehiclePage() {
 
         <div className="card">
           <h3>当前会话</h3>
-          <p className="status-copy">候选结果只保存在当前浏览器会话，不会作为公开车型库展示。</p>
+          <p className="status-copy">确认后的车系编号会保存到服务器，后续同车型可优先复用；评论数据仍会在每次任务中重新采集。</p>
           <div className="meta-row" style={{ marginTop: 14 }}>
             <StatusPill>后端识别</StatusPill>
             <StatusPill tone="success">会话口令</StatusPill>
