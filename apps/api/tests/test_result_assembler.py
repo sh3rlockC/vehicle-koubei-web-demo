@@ -87,6 +87,24 @@ def seed_result_job(job_id: str) -> None:
         session.close()
 
 
+def seed_expired_job(job_id: str) -> None:
+    session = get_session_local()()
+    try:
+        job = Job(
+            job_id=job_id,
+            query="风云X3 PLUS",
+            model_name="风云X3 PLUS",
+            status="expired",
+            current_stage="expired",
+            degraded=False,
+            passphrase_version="2026-W17",
+        )
+        session.add(job)
+        session.commit()
+    finally:
+        session.close()
+
+
 def test_result_endpoint_assembles_summary_and_wordclouds(tmp_path: Path) -> None:
     client = make_client(tmp_path)
     seed_result_job("job_fixture")
@@ -113,6 +131,26 @@ def test_result_endpoint_assembles_summary_and_wordclouds(tmp_path: Path) -> Non
     assert payload["ai_available"] is True
     assert payload["ai_report"]["headline"]
     assert payload["qa_available"] is True
+    assert payload["retention_days"] == 3
+
+
+def test_result_endpoint_returns_expired_job_without_artifacts(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    seed_expired_job("job_expired")
+
+    verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify.status_code == 200
+
+    response = client.get("/api/jobs/job_expired/result")
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["status"] == "expired"
+    assert payload["sample_summary"] == {"autohome_count": 0, "dcd_count": 0}
+    assert payload["artifacts"] == []
+    assert payload["ai_available"] is False
+    assert payload["qa_available"] is False
+    assert payload["retention_days"] == 3
 
 
 def test_artifact_download_serves_file(tmp_path: Path) -> None:

@@ -159,6 +159,7 @@ class JobResultResponse(BaseModel):
     status: str
     degraded: bool
     model_name: str
+    retention_days: int
     sample_summary: SampleSummaryResponse
     template_report: TemplateReportResponse
     structured_sections: StructuredSectionsResponse

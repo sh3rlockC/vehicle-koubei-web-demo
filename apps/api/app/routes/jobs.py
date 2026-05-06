@@ -267,6 +267,7 @@ def get_job_progress(
         "completed": "任务已完成",
         "completed_degraded": "任务已完成，部分结果降级",
         "failed": "任务执行失败",
+        "expired": "任务结果已过期，请重新创建任务",
     }.get(job.current_stage, f"当前阶段：{job.current_stage}")
 
     return JobProgressResponse(

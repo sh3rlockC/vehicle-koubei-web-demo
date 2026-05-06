@@ -328,9 +328,11 @@ export default function ResultPage() {
           <div className="download-card compact-download-card">
             <div>
               <strong>交付物已打包</strong>
-              <p>Excel、词云图片和词云词项清单。</p>
+              <p>结果文件和评论数据仅保留 {result.retention_days} 天，请及时下载 ZIP。</p>
             </div>
-            {downloadableCount ? (
+            {result.status === "expired" ? (
+              <p className="status-copy">服务器已自动清理该任务结果，请重新创建任务。</p>
+            ) : downloadableCount ? (
               <a className="download-link primary-download" href={resultBundleUrl}>
                 下载全部结果 ZIP
               </a>
@@ -442,9 +444,14 @@ export default function ResultPage() {
         <div>
           <p className="eyebrow">NEXT</p>
           <h3>继续追问，或重新发起下一辆车</h3>
+          <p>结果文件和评论数据仅保留 {result.retention_days} 天，下载后再做存档或继续加工。</p>
         </div>
         <div className="actions">
-          {downloadableCount ? (
+          {result.status === "expired" ? (
+            <Link className="button secondary" href="/vehicle">
+              重新创建任务
+            </Link>
+          ) : downloadableCount ? (
             <a className="button" href={resultBundleUrl}>
               下载结果包
             </a>

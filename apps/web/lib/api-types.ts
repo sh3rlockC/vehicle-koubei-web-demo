@@ -104,6 +104,7 @@ export type JobResultResponse = {
   status: string;
   degraded: boolean;
   model_name: string;
+  retention_days: number;
   sample_summary: SampleSummary;
   template_report: TemplateReport;
   structured_sections: StructuredSections;

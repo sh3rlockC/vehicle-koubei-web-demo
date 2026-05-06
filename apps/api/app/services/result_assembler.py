@@ -93,6 +93,7 @@ def assemble_job_result(db: Session, settings: Settings, job_id: str) -> dict | 
         "status": job.status,
         "degraded": job.degraded,
         "model_name": job.model_name,
+        "retention_days": settings.job_artifact_retention_days,
         "sample_summary": summary_data["sample_counts"] if summary_data else {"autohome_count": 0, "dcd_count": 0},
         "template_report": {
             "title": summary_data["one_pager_lines"][0] if summary_data and summary_data["one_pager_lines"] else "",
