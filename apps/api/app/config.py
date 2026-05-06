@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     llm_model_qa: str = ""
     vehicle_resolve_cache_ttl_seconds: int = 7 * 24 * 60 * 60
     vehicle_resolve_platform_timeout_seconds: int = 60
+    job_artifact_retention_days: int = 3
+    job_artifact_cleanup_interval_seconds: int = 12 * 60 * 60
 
     model_config = SettingsConfigDict(
         env_file=".env",
