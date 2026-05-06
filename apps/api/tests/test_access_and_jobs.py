@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -33,7 +34,17 @@ class FakeQueue:
         return FakeQueuedJob(job_id)
 
 
-def make_client(tmp_path: Path) -> tuple[TestClient, FakeQueue]:
+class UnavailableQueue:
+    def enqueue(self, func: str, kwargs: dict, **options):
+        raise RedisConnectionError("connection refused")
+
+
+def make_client(
+    tmp_path: Path,
+    queue: FakeQueue | UnavailableQueue | None = None,
+    *,
+    raise_server_exceptions: bool = True,
+) -> tuple[TestClient, FakeQueue | UnavailableQueue]:
     settings = Settings(
         app_env="test",
         database_url=f"sqlite+pysqlite:///{tmp_path / 'test.db'}",
@@ -45,9 +56,9 @@ def make_client(tmp_path: Path) -> tuple[TestClient, FakeQueue]:
         worker_job_timeout_seconds=2400,
     )
     app = create_app(settings)
-    fake_queue = FakeQueue()
-    app.dependency_overrides[get_job_queue] = lambda: fake_queue
-    return TestClient(app), fake_queue
+    queue = queue or FakeQueue()
+    app.dependency_overrides[get_job_queue] = lambda: queue
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions), queue
 
 
 def test_access_verify_sets_cookie(tmp_path: Path) -> None:
@@ -138,6 +149,26 @@ def test_jobs_require_session_and_can_be_queried(tmp_path: Path) -> None:
     assert progress_payload["overall_percent"] == 5
     assert progress_payload["stages"][0]["name"] == "queued"
     assert progress_payload["stages"][0]["status"] == "queued"
+
+
+def test_create_job_returns_service_unavailable_when_queue_backend_is_down(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path, queue=UnavailableQueue(), raise_server_exceptions=False)
+    verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify_response.status_code == 200
+
+    response = client.post(
+        "/api/jobs",
+        json={
+            "query": "风云X3 PLUS",
+            "selected_candidates": {
+                "autohome": {"series_id": "8089", "title": "风云X3 PLUS", "source": "fixture"},
+                "dongchedi": {"series_id": "25398", "title": "风云X3 PLUS", "source": "fixture"},
+            },
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "任务队列暂不可用，请确认 Redis 和 worker 已启动。"
 
 
 def test_progress_endpoint_includes_collector_stage_percentages(tmp_path: Path) -> None:

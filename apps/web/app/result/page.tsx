@@ -5,8 +5,8 @@ import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
 import { SignalPanel, StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError, toJsonBody } from "@/lib/api";
-import type { JobResultResponse, QaResponse } from "@/lib/api-types";
-import { clearFlowState, getFlowState } from "@/lib/flow-state";
+import type { JobResultResponse, KeywordRankItem, QaResponse } from "@/lib/api-types";
+import { clearFlowState, getFlowState, setFlowState } from "@/lib/flow-state";
 
 const statusLabels: Record<string, string> = {
   completed: "已完成",
@@ -74,6 +74,52 @@ function reportList(report: Record<string, unknown> | null, keys: string[], fall
   return fallback;
 }
 
+function KeywordRankList({
+  title,
+  tone,
+  items,
+}: {
+  title: string;
+  tone: "positive" | "negative" | "combined";
+  items: KeywordRankItem[];
+}) {
+  const maxCount = Math.max(...items.map((item) => item.count), 0);
+
+  return (
+    <div className={`keyword-rank-card keyword-rank-${tone}`}>
+      <div className="keyword-rank-head">
+        <h4>{title}</h4>
+        <span>{items.length ? `Top ${items.length}` : "暂无数据"}</span>
+      </div>
+
+      {items.length ? (
+        <div className="keyword-rank-list">
+          {items.map((item, index) => {
+            const width = maxCount > 0 ? Math.max(6, Math.round((item.count / maxCount) * 100)) : 0;
+
+            return (
+              <div className="keyword-rank-row" key={`${tone}-${item.term}-${index}`}>
+                <span className="keyword-rank-index">{String(index + 1).padStart(2, "0")}</span>
+                <div className="keyword-rank-main">
+                  <div className="keyword-rank-label">
+                    <span>{item.term}</span>
+                    <strong>{item.count}</strong>
+                  </div>
+                  <div className="keyword-rank-track" aria-hidden="true">
+                    <span style={{ width: `${width}%` }} />
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="status-copy">当前结果未返回该榜单词项。</p>
+      )}
+    </div>
+  );
+}
+
 export default function ResultPage() {
   const flowState = getFlowState();
   const [ready, setReady] = useState(false);
@@ -107,6 +153,18 @@ export default function ResultPage() {
         }
 
         setResult(payload);
+        setFlowState({
+          jobId: payload.job_id,
+          jobProgress: {
+            job_id: payload.job_id,
+            status: payload.status,
+            current_stage: payload.status,
+            degraded: payload.degraded,
+            overall_percent: 100,
+            stages: [],
+            message: labelFor(payload.status, statusLabels),
+          },
+        });
       } catch (err) {
         if (cancelled) {
           return;
@@ -220,6 +278,7 @@ export default function ResultPage() {
     result.template_report.highlights.slice(0, 4)
   );
   const actionItems = reportList(result.ai_report, ["action_items", "recommendations", "next_steps"], []);
+  const keywordRankings = result.wordcloud.keyword_rankings ?? { positive: [], negative: [], combined: [] };
 
   return (
     <main className="result-page">
@@ -361,6 +420,22 @@ export default function ResultPage() {
             )}
           </div>
         </aside>
+      </section>
+
+      <section className="keyword-rank-section">
+        <div className="keyword-rank-section-head">
+          <div>
+            <p className="eyebrow">WORD RANK</p>
+            <h3>关键词出现次数排名</h3>
+          </div>
+          <p>按词云词项清单中的出现次数排序，分别查看优点、槽点和全量关键词的高频关注点。</p>
+        </div>
+
+        <div className="keyword-rank-grid">
+          <KeywordRankList title="优点关键词" tone="positive" items={keywordRankings.positive} />
+          <KeywordRankList title="槽点关键词" tone="negative" items={keywordRankings.negative} />
+          <KeywordRankList title="全部关键词" tone="combined" items={keywordRankings.combined} />
+        </div>
       </section>
 
       <div className="result-actions">

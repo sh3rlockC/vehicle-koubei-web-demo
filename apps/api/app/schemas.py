@@ -131,10 +131,22 @@ class StructuredSectionsResponse(BaseModel):
     opportunities: list[dict[str, str]] = Field(default_factory=list)
 
 
+class KeywordRankItemResponse(BaseModel):
+    term: str
+    count: int
+
+
+class KeywordRankingsResponse(BaseModel):
+    positive: list[KeywordRankItemResponse] = Field(default_factory=list)
+    negative: list[KeywordRankItemResponse] = Field(default_factory=list)
+    combined: list[KeywordRankItemResponse] = Field(default_factory=list)
+
+
 class WordcloudResponse(BaseModel):
     positive_image_url: str | None = None
     negative_image_url: str | None = None
     terms_excel_url: str | None = None
+    keyword_rankings: KeywordRankingsResponse = Field(default_factory=KeywordRankingsResponse)
 
 
 class SampleSummaryResponse(BaseModel):

@@ -73,10 +73,22 @@ export type StructuredSections = {
   opportunities: Array<Record<string, string>>;
 };
 
+export type KeywordRankItem = {
+  term: string;
+  count: number;
+};
+
+export type KeywordRankings = {
+  positive: KeywordRankItem[];
+  negative: KeywordRankItem[];
+  combined: KeywordRankItem[];
+};
+
 export type Wordcloud = {
   positive_image_url: string | null;
   negative_image_url: string | null;
   terms_excel_url: string | null;
+  keyword_rankings: KeywordRankings;
 };
 
 export type ArtifactItem = {

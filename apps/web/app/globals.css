@@ -1179,6 +1179,159 @@ details.card summary {
   background: rgba(255, 255, 255, 0.92);
 }
 
+.keyword-rank-section {
+  display: grid;
+  gap: 18px;
+  border: 1px solid rgba(126, 203, 255, 0.16);
+  border-radius: 22px;
+  padding: 22px;
+  background:
+    linear-gradient(135deg, rgba(115, 208, 255, 0.08), transparent 38%),
+    rgba(255, 255, 255, 0.035);
+}
+
+.keyword-rank-section-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-end;
+}
+
+.keyword-rank-section-head h3,
+.keyword-rank-section-head p {
+  margin: 0;
+}
+
+.keyword-rank-section-head h3 {
+  color: var(--text-strong);
+}
+
+.keyword-rank-section-head > p {
+  max-width: 520px;
+  color: var(--muted-strong);
+  line-height: 1.7;
+}
+
+.keyword-rank-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.keyword-rank-card {
+  min-width: 0;
+  border: 1px solid rgba(126, 203, 255, 0.14);
+  border-radius: 18px;
+  padding: 16px;
+  background: rgba(3, 8, 18, 0.28);
+}
+
+.keyword-rank-positive {
+  border-color: rgba(137, 247, 184, 0.24);
+}
+
+.keyword-rank-negative {
+  border-color: rgba(255, 125, 125, 0.24);
+}
+
+.keyword-rank-combined {
+  border-color: rgba(115, 208, 255, 0.24);
+}
+
+.keyword-rank-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.keyword-rank-head h4,
+.keyword-rank-head span {
+  margin: 0;
+}
+
+.keyword-rank-head h4 {
+  color: var(--text-strong);
+}
+
+.keyword-rank-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.keyword-rank-list {
+  display: grid;
+  gap: 12px;
+}
+
+.keyword-rank-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.keyword-rank-index {
+  color: var(--muted);
+  font-family: "DIN Alternate", "Avenir Next Condensed", "Noto Sans SC", sans-serif;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.keyword-rank-main {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.keyword-rank-label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.keyword-rank-label span {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.keyword-rank-label strong {
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.keyword-rank-track {
+  height: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.keyword-rank-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+}
+
+.keyword-rank-positive .keyword-rank-track span {
+  background: linear-gradient(90deg, rgba(137, 247, 184, 0.42), var(--success));
+}
+
+.keyword-rank-negative .keyword-rank-track span {
+  background: linear-gradient(90deg, rgba(255, 125, 125, 0.42), var(--danger));
+}
+
+.keyword-rank-combined .keyword-rank-track span {
+  background: linear-gradient(90deg, rgba(115, 208, 255, 0.34), #a7e4ff);
+}
+
 .qa-panel {
   margin-top: 18px;
 }
@@ -1328,6 +1481,15 @@ details.card summary {
   .result-actions {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .keyword-rank-section-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .keyword-rank-grid {
+    grid-template-columns: 1fr;
   }
 
   .panel,

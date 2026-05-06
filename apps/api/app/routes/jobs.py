@@ -8,6 +8,7 @@ import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse, Response
+from redis.exceptions import RedisError
 from rq import Queue
 from sqlalchemy.orm import Session
 
@@ -31,6 +32,7 @@ from app.services.qa_service import answer_job_question, find_summary_artifact
 from app.services.result_assembler import assemble_job_result
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+QUEUE_UNAVAILABLE_MESSAGE = "任务队列暂不可用，请确认 Redis 和 worker 已启动。"
 
 
 def _ensure_session(request: Request, settings: Settings) -> None:
@@ -145,26 +147,35 @@ def create_job(
         ]
     )
 
-    db.add(
-        JobStageRun(
-            job_id=job.job_id,
-            stage_name="queued",
-            attempt_no=1,
-            status="queued",
-        )
+    queued_stage = JobStageRun(
+        job_id=job.job_id,
+        stage_name="queued",
+        attempt_no=1,
+        status="queued",
     )
+    db.add(queued_stage)
     db.commit()
     db.refresh(job)
 
-    queue_job = queue.enqueue(
-        "worker_jobs.run_job",
-        kwargs={
-            "job_id": job.job_id,
-            "database_url": settings.database_url,
-            "artifact_root": settings.artifact_root,
-        },
-        job_timeout=settings.worker_job_timeout_seconds,
-    )
+    try:
+        queue_job = queue.enqueue(
+            "worker_jobs.run_job",
+            kwargs={
+                "job_id": job.job_id,
+                "database_url": settings.database_url,
+                "artifact_root": settings.artifact_root,
+            },
+            job_timeout=settings.worker_job_timeout_seconds,
+        )
+    except RedisError as exc:
+        job.status = "failed"
+        job.current_stage = "failed"
+        queued_stage.status = "failed"
+        queued_stage.error_code = "queue_unavailable"
+        queued_stage.error_message = QUEUE_UNAVAILABLE_MESSAGE
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=QUEUE_UNAVAILABLE_MESSAGE) from exc
+
     job.queue_job_id = queue_job.id
     job.enqueued_at = job.created_at
     db.commit()

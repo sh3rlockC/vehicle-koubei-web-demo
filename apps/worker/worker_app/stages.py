@@ -60,6 +60,15 @@ def resolve_stage_command(stage: StageCommand, *, single_platform_mode: bool) ->
     return stage
 
 
+def build_wordcloud_font_args() -> list[str]:
+    if not WORDCLOUD_FONT_PATH:
+        return []
+    font_path = Path(WORDCLOUD_FONT_PATH).expanduser()
+    if font_path.exists():
+        return ["--font-path", str(font_path)]
+    return []
+
+
 def build_stage_commands(
     *,
     job_paths: JobPaths,
@@ -216,8 +225,7 @@ def build_stage_commands(
                 str(job_paths.outputs.wordcloud),
                 "--model-name",
                 model_name,
-                "--font-path",
-                WORDCLOUD_FONT_PATH,
+                *build_wordcloud_font_args(),
                 "--json",
             ],
             core=False,

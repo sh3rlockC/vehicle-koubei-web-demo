@@ -103,6 +103,12 @@ def test_result_endpoint_assembles_summary_and_wordclouds(tmp_path: Path) -> Non
     assert payload["template_report"]["title"] == "双平台口碑一页纸总结"
     assert payload["wordcloud"]["positive_image_url"].endswith("/api/jobs/job_fixture/artifacts/2")
     assert payload["wordcloud"]["negative_image_url"].endswith("/api/jobs/job_fixture/artifacts/3")
+    rankings = payload["wordcloud"]["keyword_rankings"]
+    assert [item["term"] for item in rankings["positive"][:3]] == ["外观设计", "空间", "配置性价比"]
+    assert rankings["positive"][0]["count"] == 127
+    assert [item["term"] for item in rankings["negative"][:3]] == ["内饰质感", "外观设计", "空间"]
+    assert rankings["negative"][0]["count"] == 59
+    assert rankings["combined"][0] == {"term": "外观设计", "count": 186}
     assert payload["artifacts"][0]["type"] == "summary_excel"
     assert payload["ai_available"] is True
     assert payload["ai_report"]["headline"]

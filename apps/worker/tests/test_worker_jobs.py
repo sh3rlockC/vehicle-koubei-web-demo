@@ -9,6 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import worker_jobs
+import worker_app.stages as stages_module
 from worker_app.artifacts import ensure_job_dirs
 from worker_app.jobs import PipelineResult
 from worker_app.stages import build_stage_commands, StageCommand
@@ -57,9 +58,8 @@ def test_run_job_uses_configured_stage_runner(monkeypatch, tmp_path: Path) -> No
     assert result["status"] == "completed"
 
 
-def test_wordcloud_stage_uses_container_cjk_font_path(tmp_path: Path) -> None:
-    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_font")
-    dependency_map = {
+def make_dependency_map(tmp_path: Path) -> dict[str, dict[str, str]]:
+    return {
         "auto-koubei-collector": {"path": str(tmp_path), "entrypoint": "auto.py"},
         "dcd-koubei-collector": {"path": str(tmp_path), "entrypoint": "dcd.py"},
         "koubei-postprocess": {"path": str(tmp_path), "entrypoint": "post.py"},
@@ -67,15 +67,38 @@ def test_wordcloud_stage_uses_container_cjk_font_path(tmp_path: Path) -> None:
         "koubei-wordcloud": {"path": str(tmp_path), "entrypoint": "wordcloud.py"},
     }
 
+
+def test_wordcloud_stage_omits_missing_default_font_path(monkeypatch, tmp_path: Path) -> None:
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_font")
+    monkeypatch.setattr(stages_module, "WORDCLOUD_FONT_PATH", str(tmp_path / "missing.ttc"))
+
     stages = build_stage_commands(
         job_paths=job_paths,
         model_name="测试车",
         autohome_series_id="8089",
         dongchedi_series_id="25398",
-        dependency_map=dependency_map,
+        dependency_map=make_dependency_map(tmp_path),
+    )
+
+    wordcloud_stage = next(stage for stage in stages if stage.name == "rendering_wordcloud")
+    assert "--font-path" not in wordcloud_stage.command
+
+
+def test_wordcloud_stage_uses_configured_font_path(monkeypatch, tmp_path: Path) -> None:
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_font_configured")
+    font_path = tmp_path / "font.ttc"
+    font_path.write_bytes(b"font")
+    monkeypatch.setattr(stages_module, "WORDCLOUD_FONT_PATH", str(font_path))
+
+    stages = build_stage_commands(
+        job_paths=job_paths,
+        model_name="测试车",
+        autohome_series_id="8089",
+        dongchedi_series_id="25398",
+        dependency_map=make_dependency_map(tmp_path),
     )
 
     wordcloud_stage = next(stage for stage in stages if stage.name == "rendering_wordcloud")
     assert "--font-path" in wordcloud_stage.command
     font_path = wordcloud_stage.command[wordcloud_stage.command.index("--font-path") + 1]
-    assert font_path == "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+    assert font_path == str(tmp_path / "font.ttc")
