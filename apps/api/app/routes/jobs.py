@@ -28,8 +28,10 @@ from app.schemas import (
 )
 from app.services.confirmed_vehicle_series import upsert_confirmed_vehicle_series
 from app.services.job_queue import get_job_queue
+from app.services.keyword_rank_images import build_keyword_rank_pngs
 from app.services.passphrase import require_passphrase_session
 from app.services.qa_service import answer_job_question, find_summary_artifact
+from app.services.result_reader import read_wordcloud_terms_workbook
 from app.services.result_assembler import assemble_job_result
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -80,6 +82,10 @@ def _read_stage_progress(settings: Settings, job_id: str, stage_name: str, stage
 def _is_result_bundle_artifact(path: str) -> bool:
     lower_path = path.lower()
     return lower_path.endswith((".xlsx", ".png"))
+
+
+def _is_wordcloud_terms_artifact(path: str) -> bool:
+    return path.lower().endswith("_词云词项清单.xlsx")
 
 
 def _safe_zip_name(path: Path, seen: set[str]) -> str:
@@ -373,6 +379,20 @@ def download_result_bundle(
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in paths:
             archive.write(path, arcname=_safe_zip_name(path, seen_names))
+        term_path = next(
+            (
+                Path(artifact.artifact_path)
+                for artifact in artifacts
+                if _is_wordcloud_terms_artifact(artifact.artifact_path) and Path(artifact.artifact_path).exists()
+            ),
+            None,
+        )
+        if term_path:
+            rankings = read_wordcloud_terms_workbook(term_path)
+            for filename, content in build_keyword_rank_pngs(rankings):
+                if filename not in seen_names:
+                    seen_names.add(filename)
+                    archive.writestr(filename, content)
 
     filename = f"{job.model_name}_全部结果.zip"
     encoded_filename = quote(filename)

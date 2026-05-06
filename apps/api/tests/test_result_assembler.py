@@ -180,8 +180,17 @@ def test_result_zip_download_bundles_excel_and_wordcloud_files(tmp_path: Path) -
 
     with zipfile.ZipFile(BytesIO(response.content)) as archive:
         names = set(archive.namelist())
+        rank_pngs = {
+            "keyword_rank_positive.png": archive.read("keyword_rank_positive.png"),
+            "keyword_rank_negative.png": archive.read("keyword_rank_negative.png"),
+            "keyword_rank_combined.png": archive.read("keyword_rank_combined.png"),
+        }
 
     assert "风云X3 PLUS_双平台口碑摘要.xlsx" in names
     assert "风云X3 PLUS_优点词云.png" in names
     assert "风云X3 PLUS_槽点词云.png" in names
     assert "风云X3 PLUS_词云词项清单.xlsx" in names
+    assert "keyword_rank_positive.png" in names
+    assert "keyword_rank_negative.png" in names
+    assert "keyword_rank_combined.png" in names
+    assert all(content.startswith(b"\x89PNG\r\n\x1a\n") for content in rank_pngs.values())
