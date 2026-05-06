@@ -22,6 +22,15 @@ const stageLabels: Record<string, string> = {
   expired: "已过期",
 };
 
+const emptyFlowState: FlowState = {
+  accessVersion: null,
+  vehicleQuery: null,
+  vehicleResolve: null,
+  selectedCandidates: null,
+  jobId: null,
+  jobProgress: null,
+};
+
 function shortJobId(jobId: string | null) {
   if (!jobId) {
     return "未创建";
@@ -40,7 +49,7 @@ function currentStageLabel(state: FlowState) {
 export function AppChrome({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const activeStep = stepForPath(pathname);
-  const [flowState, setLocalFlowState] = useState<FlowState>(() => getFlowState());
+  const [flowState, setLocalFlowState] = useState<FlowState>(emptyFlowState);
 
   useEffect(() => {
     const refresh = () => setLocalFlowState(getFlowState());

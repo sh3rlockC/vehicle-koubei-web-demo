@@ -1,0 +1,22 @@
+# 更新日志
+
+## 2026-05-06
+
+### 新增
+
+- 结果页新增“关键词出现次数排名”模块，按优点关键词、槽点关键词、全部关键词拆成三个从上到下排序的条形榜单。
+- 优点榜单使用绿色、槽点榜单使用红色、全部关键词榜单使用淡蓝色，和词云区域一起展示结果侧重点。
+- API 结果响应新增 `wordcloud.keyword_rankings`，从词云词项 Excel 中读取词项和出现次数。
+
+### 修复
+
+- 补齐 API 和 Worker 的 Python 依赖声明，避免本地或服务器环境缺少 `requests`、`openpyxl`、`pandas`、`wordcloud` 等运行依赖。
+- 创建采集任务时，如果 Redis/RQ 队列不可用，后端现在返回 503，并把任务阶段标记为失败，避免页面只看到泛化的 500。
+- 词云字体路径不存在时，Worker 不再强制传入无效字体参数，允许词云脚本自动选择可用中文字体。
+- 前端 Shell 初始渲染不再直接读取浏览器本地会话状态，减少 Next.js hydration mismatch。
+
+### 验证
+
+- 本地通过 API 和 Worker 测试：`pytest apps/api/tests apps/worker/tests -q`。
+- 本地通过 Web 类型检查：`npm --prefix apps/web run typecheck`。
+- 服务器已重建 `api`、`worker`、`web` 服务，并验证页面入口、口令校验、车型解析、Redis 和容器健康状态。

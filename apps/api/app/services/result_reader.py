@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Literal
 
 from openpyxl import load_workbook
+
+KeywordDirection = Literal["positive", "negative"]
+
+
+def _empty_keyword_rankings() -> dict[str, list[dict[str, int | str]]]:
+    return {"positive": [], "negative": [], "combined": []}
 
 
 def _iter_table_rows(worksheet, *, limit: int | None = None) -> list[dict[str, str]]:
@@ -47,6 +54,101 @@ def _read_one_pager_lines(worksheet, *, limit: int = 12) -> list[str]:
         if len(lines) >= limit:
             break
     return lines
+
+
+def _numeric_weight(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _count_from_weight(value: float) -> int:
+    return int(round(value))
+
+
+def _sort_keyword_rows(rows: list[tuple[str, float, int]], *, limit: int) -> list[dict[str, int | str]]:
+    sorted_rows = sorted(rows, key=lambda item: (-item[1], item[2], item[0]))
+    return [{"term": term, "count": _count_from_weight(weight)} for term, weight, _index in sorted_rows[:limit]]
+
+
+def _rankings_from_breakdown(worksheet, *, limit: int) -> dict[str, list[dict[str, int | str]]]:
+    rows = list(worksheet.iter_rows(values_only=True))
+    if not rows:
+        return _empty_keyword_rankings()
+
+    header = [str(cell).strip() if cell is not None else "" for cell in rows[0]]
+    positive_rows: list[tuple[str, float, int]] = []
+    negative_rows: list[tuple[str, float, int]] = []
+    combined_weights: dict[str, tuple[float, int]] = {}
+
+    for index, row in enumerate(rows[1:]):
+        values = {header[cell_index]: row[cell_index] for cell_index in range(min(len(header), len(row))) if header[cell_index]}
+        direction = values.get("direction")
+        term = str(values.get("term") or "").strip()
+        weight = _numeric_weight(values.get("weight"))
+        if direction not in {"positive", "negative"} or not term or weight <= 0:
+            continue
+
+        bucket = positive_rows if direction == "positive" else negative_rows
+        bucket.append((term, weight, index))
+        previous_weight, first_index = combined_weights.get(term, (0.0, index))
+        combined_weights[term] = (previous_weight + weight, min(first_index, index))
+
+    combined_rows = [(term, weight, index) for term, (weight, index) in combined_weights.items()]
+    return {
+        "positive": _sort_keyword_rows(positive_rows, limit=limit),
+        "negative": _sort_keyword_rows(negative_rows, limit=limit),
+        "combined": _sort_keyword_rows(combined_rows, limit=limit),
+    }
+
+
+def _rankings_from_terms_sheets(workbook, *, limit: int) -> dict[str, list[dict[str, int | str]]]:
+    direction_to_sheet: dict[KeywordDirection, str] = {
+        "positive": "positive_terms",
+        "negative": "negative_terms",
+    }
+    grouped: dict[KeywordDirection, dict[str, tuple[float, int]]] = {"positive": {}, "negative": {}}
+    combined_weights: dict[str, tuple[float, int]] = {}
+    global_index = 0
+
+    for direction, sheet_name in direction_to_sheet.items():
+        if sheet_name not in workbook.sheetnames:
+            continue
+        rows = list(workbook[sheet_name].iter_rows(values_only=True))
+        if not rows:
+            continue
+        header = [str(cell).strip() if cell is not None else "" for cell in rows[0]]
+        for row in rows[1:]:
+            global_index += 1
+            values = {header[cell_index]: row[cell_index] for cell_index in range(min(len(header), len(row))) if header[cell_index]}
+            term = str(values.get("term") or "").strip()
+            weight = _numeric_weight(values.get("weight"))
+            if not term or weight <= 0:
+                continue
+
+            previous_weight, first_index = grouped[direction].get(term, (0.0, global_index))
+            grouped[direction][term] = (previous_weight + weight, min(first_index, global_index))
+            combined_weight, combined_index = combined_weights.get(term, (0.0, global_index))
+            combined_weights[term] = (combined_weight + weight, min(combined_index, global_index))
+
+    positive_rows = [(term, weight, index) for term, (weight, index) in grouped["positive"].items()]
+    negative_rows = [(term, weight, index) for term, (weight, index) in grouped["negative"].items()]
+    combined_rows = [(term, weight, index) for term, (weight, index) in combined_weights.items()]
+    return {
+        "positive": _sort_keyword_rows(positive_rows, limit=limit),
+        "negative": _sort_keyword_rows(negative_rows, limit=limit),
+        "combined": _sort_keyword_rows(combined_rows, limit=limit),
+    }
+
+
+def read_wordcloud_terms_workbook(path: str | Path, *, limit: int = 10) -> dict[str, list[dict[str, int | str]]]:
+    workbook = load_workbook(Path(path), data_only=True)
+    if "platform_breakdown" in workbook.sheetnames:
+        rankings = _rankings_from_breakdown(workbook["platform_breakdown"], limit=limit)
+        if rankings["positive"] or rankings["negative"] or rankings["combined"]:
+            return rankings
+    return _rankings_from_terms_sheets(workbook, limit=limit)
 
 
 def read_summary_workbook(path: str | Path) -> dict:

@@ -8,7 +8,7 @@ from app.config import Settings
 from app.models import Job, JobAIReport, JobArtifact, JobQAChunk
 from app.services.ai_report import ensure_ai_report
 from app.services.qa_service import ensure_qa_chunks
-from app.services.result_reader import read_summary_workbook
+from app.services.result_reader import read_summary_workbook, read_wordcloud_terms_workbook
 
 
 def _artifact_url(job_id: str, artifact_id: int) -> str:
@@ -82,6 +82,11 @@ def assemble_job_result(db: Session, settings: Settings, job_id: str) -> dict | 
     positive_wordcloud = next((item for item in artifact_items if item["type"] == "wordcloud_positive"), None)
     negative_wordcloud = next((item for item in artifact_items if item["type"] == "wordcloud_negative"), None)
     term_excel = next((item for item in artifact_items if item["type"] == "wordcloud_terms_excel"), None)
+    keyword_rankings = (
+        read_wordcloud_terms_workbook(term_excel["path"])
+        if term_excel and Path(term_excel["path"]).exists()
+        else {"positive": [], "negative": [], "combined": []}
+    )
 
     return {
         "job_id": job.job_id,
@@ -103,6 +108,7 @@ def assemble_job_result(db: Session, settings: Settings, job_id: str) -> dict | 
             "positive_image_url": positive_wordcloud["url"] if positive_wordcloud else None,
             "negative_image_url": negative_wordcloud["url"] if negative_wordcloud else None,
             "terms_excel_url": term_excel["url"] if term_excel else None,
+            "keyword_rankings": keyword_rankings,
         },
         "artifacts": artifact_items,
         "ai_report": ai_report.report_json if ai_report else None,

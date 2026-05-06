@@ -20,5 +20,7 @@ apps/web/tsconfig.tsbuildinfo
 
 # Runtime artifacts and local secrets
 storage/jobs/job_*/
+storage/local-test/
+.superpowers/
 ops/secrets/*
 !ops/secrets/openclaw_gateway_token.placeholder
