@@ -1240,22 +1240,40 @@ def generate_outputs(
             batch_size = int(active_env.get("HERMES_BATCH_SIZE") or DEFAULT_BATCH_SIZE)
             batches = _batch_items(comments, batch_size)
             batch_payloads: list[dict[str, Any]] = []
+            batch_fallbacks: list[dict[str, Any]] = []
+            successful_batch_count = 0
             total_batches = max(len(batches), 1)
             for index, batch in enumerate(batches or [[]], start=1):
                 _write_progress(progress_path, percent=10 + int(index * 50 / total_batches), message=f"Hermes 分析批次 {index}/{total_batches}")
-                payload = _call_hermes(
-                    _build_batch_prompt(model_name=model_name, batch_index=index, total_batches=total_batches, comments=batch),
-                    hermes_command=hermes_command,
-                    env=active_env,
-                    debug_dir=hermes_debug_dir,
-                    call_label=f"batch_{index:03d}",
-                )
+                try:
+                    payload = _call_hermes(
+                        _build_batch_prompt(model_name=model_name, batch_index=index, total_batches=total_batches, comments=batch),
+                        hermes_command=hermes_command,
+                        env=active_env,
+                        debug_dir=hermes_debug_dir,
+                        call_label=f"batch_{index:03d}",
+                    )
+                    if not isinstance(payload, dict):
+                        raise ValueError("hermes_invalid_json:batch payload is not object")
+                    successful_batch_count += 1
+                except Exception as exc:
+                    reason = str(exc) or exc.__class__.__name__
+                    batch_fallbacks.append({"batch": index, "reason": reason})
+                    _write_progress(
+                        progress_path,
+                        percent=10 + int(index * 50 / total_batches),
+                        message=f"Hermes 批次 {index}/{total_batches} 失败，使用本地批次兜底",
+                    )
+                    payload = _local_batch_payload(batch_index=index, total_batches=total_batches, comments=batch, reason=reason)
                 if not isinstance(payload, dict):
                     raise ValueError("hermes_invalid_json:batch payload is not object")
                 batch_payloads.append(payload)
+            if batch_payloads and successful_batch_count == 0:
+                reason = batch_fallbacks[-1]["reason"] if batch_fallbacks else "hermes_all_batches_failed"
+                raise RuntimeError(reason)
 
             _write_progress(progress_path, percent=70, message="Hermes 汇总批次结果")
-            aggregate_source = "hermes"
+            aggregate_source = "hermes-partial-local-batch" if batch_fallbacks else "hermes"
             aggregate_fallback_reason = ""
             aggregate_env = dict(active_env)
             aggregate_timeout = (active_env.get("HERMES_AGGREGATE_TIMEOUT_SECONDS") or "").strip()
@@ -1298,6 +1316,8 @@ def generate_outputs(
             }
             if aggregate_fallback_reason:
                 result["aggregate_fallback_reason"] = aggregate_fallback_reason
+            if batch_fallbacks:
+                result["batch_fallbacks"] = batch_fallbacks
             return result
         except Exception as exc:
             fallback_reason = str(exc)

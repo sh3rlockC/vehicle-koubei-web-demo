@@ -450,6 +450,92 @@ else:
     assert "车机" in report["headline"]
 
 
+def test_generate_outputs_uses_local_batch_when_one_batch_json_remains_invalid(tmp_path: Path) -> None:
+    zj_path, dcd_path = _write_input_workbooks(tmp_path)
+    summary_script = tmp_path / "summary.py"
+    wordcloud_script = tmp_path / "wordcloud.py"
+    fake_hermes = tmp_path / "hermes"
+    state_path = tmp_path / "fake-hermes-count.txt"
+    _write_fake_summary_script(summary_script)
+    _write_fake_wordcloud_script(wordcloud_script)
+    fake_hermes.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+state_path = Path("__STATE_PATH__")
+count = int(state_path.read_text(encoding="utf-8")) if state_path.exists() else 0
+count += 1
+state_path.write_text(str(count), encoding="utf-8")
+prompt = sys.argv[-1]
+if "请归并各批分析结果" in prompt:
+    assert "本地批次兜底" in prompt
+    print(json.dumps({
+        "headline": "测试车全量报告已生成。",
+        "executive_summary": "单批 Hermes JSON 失败后使用本地批次兜底继续完成。",
+        "strength_blocks": [{"title": "核心好评", "summary": "空间大、本地批次兜底", "evidence_ids": ["autohome_0001"]}],
+        "weakness_blocks": [{"title": "核心槽点", "summary": "车机卡顿、本地槽点", "evidence_ids": ["dcd_0001"]}],
+        "platform_difference_blocks": [],
+        "action_blocks": [{"title": "产品建议", "summary": "复核本地兜底批次并优化车机", "evidence_ids": ["dcd_0001"]}],
+        "boss_brief": ["全量报告完成"],
+        "keyword_rankings": {
+            "positive": [{"term": "空间", "count": 1}, {"term": "本地批次兜底", "count": 1}],
+            "negative": [{"term": "车机", "count": 1}, {"term": "本地槽点", "count": 1}]
+        },
+        "qa_chunks": [],
+        "compare_rows": [],
+        "opportunity_rows": []
+    }, ensure_ascii=False))
+elif count == 1:
+    print(json.dumps({
+        "themes": [
+            {"direction": "positive", "term": "空间", "count": 1, "summary": "空间大", "evidence_ids": ["autohome_0001"]},
+            {"direction": "negative", "term": "内饰", "count": 1, "summary": "内饰一般", "evidence_ids": ["autohome_0001"]}
+        ],
+        "suggestions": [],
+        "platform_notes": [],
+        "boss_brief": ["空间好评突出"]
+    }, ensure_ascii=False))
+else:
+    print('{"themes":[{"direction":"negative","term":"车机","count":1}')
+""".replace("__STATE_PATH__", str(state_path)),
+        encoding="utf-8",
+    )
+    fake_hermes.chmod(0o755)
+
+    result = generate_outputs(
+        autohome_input=zj_path,
+        dcd_input=dcd_path,
+        postprocess_input=tmp_path / "dual.xlsx",
+        summary_output=tmp_path / "summary" / "测试车_双平台口碑摘要.xlsx",
+        terms_output=tmp_path / "wordcloud" / "测试车_词云词项清单.xlsx",
+        wordcloud_output_dir=tmp_path / "wordcloud",
+        final_report_output=tmp_path / "ai" / "final_report.json",
+        qa_chunks_output=tmp_path / "ai" / "qa_chunks.json",
+        model_name="测试车",
+        progress_file=tmp_path / "progress" / "generating_hermes_outputs.progress.json",
+        summary_script=summary_script,
+        wordcloud_script=wordcloud_script,
+        hermes_command=str(fake_hermes),
+        env={
+            **os.environ,
+            "LLM_API_KEY": "test-key",
+            "LLM_MODEL_REPORT": "deepseek-chat",
+            "HERMES_BATCH_SIZE": "1",
+            "HERMES_JSON_RETRIES": "1",
+        },
+    )
+
+    assert result["status"] == "success"
+    assert result["degraded"] is False
+    assert result["source"] == "hermes-partial-local-batch"
+    assert result["batch_fallbacks"] == [{"batch": 2, "reason": "hermes_invalid_json:response JSON was not balanced"}]
+    assert Path(result["final_report_path"]).exists()
+    report = json.loads(Path(result["final_report_path"]).read_text(encoding="utf-8"))
+    assert report["headline"] == "测试车全量报告已生成。"
+
+
 def test_generate_outputs_clears_stale_hermes_debug_logs(tmp_path: Path) -> None:
     zj_path, dcd_path = _write_input_workbooks(tmp_path)
     summary_script = tmp_path / "summary.py"
