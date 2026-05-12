@@ -21,9 +21,10 @@ PLATFORM_AUTOHOME = "汽车之家"
 PLATFORM_DCD = "懂车帝"
 DEFAULT_BATCH_SIZE = 20
 MAX_REPAIR_RESPONSE_CHARS = 120_000
-MAX_AGGREGATE_THEMES_PER_DIRECTION = 6
-MAX_AGGREGATE_SUGGESTIONS = 5
-MAX_AGGREGATE_PLATFORM_NOTES = 2
+MAX_AGGREGATE_THEMES_PER_DIRECTION = 2
+MAX_AGGREGATE_SUGGESTIONS = 1
+MAX_AGGREGATE_PLATFORM_NOTES = 1
+MAX_AGGREGATE_PAYLOAD_BYTES = 70_000
 LEGACY_LABEL_REPLACEMENTS = {
     "核心卖点TOP": "最满意TOP",
     "核心槽点TOP": "最不满意TOP",
@@ -515,7 +516,7 @@ def _count_value(value: Any) -> int:
         return 0
 
 
-def _compact_evidence_ids(value: Any, *, limit: int = 3) -> list[str]:
+def _compact_evidence_ids(value: Any, *, limit: int = 1) -> list[str]:
     ids: list[str] = []
     for item in _as_list(value):
         text = _clean_text(item, limit=80)
@@ -539,9 +540,9 @@ def _compact_themes(value: Any) -> list[dict[str, Any]]:
             selected.append(
                 {
                     "direction": direction,
-                    "term": _clean_text(item.get("term"), limit=80),
+                    "term": _clean_text(item.get("term"), limit=50),
                     "count": max(_count_value(item.get("count")), 1),
-                    "summary": _clean_text(item.get("summary") or item.get("description"), limit=240),
+                    "summary": _clean_text(item.get("summary") or item.get("description"), limit=80),
                     "evidence_ids": _compact_evidence_ids(item.get("evidence_ids")),
                 }
             )
@@ -557,17 +558,17 @@ def _compact_batch_payloads(batch_payloads: list[dict[str, Any]]) -> list[dict[s
         for item in _as_list(payload.get("suggestions"))[:MAX_AGGREGATE_SUGGESTIONS]:
             if not isinstance(item, dict):
                 continue
-            text = _clean_text(item.get("text"), limit=220)
+            text = _clean_text(item.get("text"), limit=80)
             if text:
-                suggestions.append({"direction": _clean_text(item.get("direction"), limit=80), "text": text})
+                suggestions.append({"direction": _clean_text(item.get("direction"), limit=50), "text": text})
 
         platform_notes = []
         for item in _as_list(payload.get("platform_notes"))[:MAX_AGGREGATE_PLATFORM_NOTES]:
             if not isinstance(item, dict):
                 continue
-            summary = _clean_text(item.get("summary"), limit=260)
+            summary = _clean_text(item.get("summary"), limit=80)
             if summary:
-                platform_notes.append({"platform": _clean_text(item.get("platform"), limit=80), "summary": summary})
+                platform_notes.append({"platform": _clean_text(item.get("platform"), limit=50), "summary": summary})
 
         compacted.append(
             {
@@ -576,18 +577,54 @@ def _compact_batch_payloads(batch_payloads: list[dict[str, Any]]) -> list[dict[s
                 "suggestions": suggestions,
                 "platform_notes": platform_notes,
                 "boss_brief": [
-                    _clean_text(item, limit=260)
-                    for item in _as_list(payload.get("boss_brief"))[:2]
-                    if _clean_text(item, limit=260)
+                    _clean_text(item, limit=80)
+                    for item in _as_list(payload.get("boss_brief"))[:1]
+                    if _clean_text(item, limit=80)
                 ],
             }
         )
     return compacted
 
 
+def _json_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, default=_json_default).encode("utf-8"))
+
+
+def _fit_aggregate_payloads_to_command_limit(compacted_payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if _json_size(compacted_payloads) <= MAX_AGGREGATE_PAYLOAD_BYTES:
+        return compacted_payloads
+
+    reduced: list[dict[str, Any]] = []
+    for payload in compacted_payloads:
+        themes = []
+        for theme in _as_list(payload.get("themes"))[:4]:
+            if not isinstance(theme, dict):
+                continue
+            themes.append(
+                {
+                    "direction": _clean_text(theme.get("direction"), limit=20),
+                    "term": _clean_text(theme.get("term"), limit=40),
+                    "count": _count_value(theme.get("count")),
+                    "summary": _clean_text(theme.get("summary"), limit=45),
+                    "evidence_ids": _compact_evidence_ids(theme.get("evidence_ids"), limit=1),
+                }
+            )
+        reduced.append({"batch": _clean_text(payload.get("batch"), limit=20), "themes": themes})
+    if _json_size(reduced) <= MAX_AGGREGATE_PAYLOAD_BYTES:
+        return reduced
+
+    fitted: list[dict[str, Any]] = []
+    for payload in reduced:
+        candidate = [*fitted, payload]
+        if _json_size(candidate) > MAX_AGGREGATE_PAYLOAD_BYTES:
+            break
+        fitted = candidate
+    return fitted or reduced[:1]
+
+
 def _build_aggregate_prompt(*, model_name: str, comments: list[dict[str, str]], batch_payloads: list[dict[str, Any]]) -> str:
     sample_counts = Counter(comment["platform"] for comment in comments)
-    compacted_payloads = _compact_batch_payloads(batch_payloads)
+    compacted_payloads = _fit_aggregate_payloads_to_command_limit(_compact_batch_payloads(batch_payloads))
     return (
         "你是汽车口碑分析Agent。请归并各批分析结果，生成最终结果。只返回严格JSON，不要Markdown。\n"
         "JSON schema: {\"headline\":\"一句话结论\",\"executive_summary\":\"摘要\","

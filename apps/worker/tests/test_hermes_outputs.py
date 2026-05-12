@@ -209,6 +209,36 @@ def test_aggregate_prompt_compacts_large_batch_payloads() -> None:
     assert "长摘要" * 120 not in prompt
 
 
+def test_aggregate_prompt_stays_below_command_argument_limit_for_many_batches() -> None:
+    comments = [{"platform": "汽车之家"} for _ in range(1000)] + [{"platform": "懂车帝"} for _ in range(142)]
+    long_summary = "长摘要" * 120
+    batch_payloads = [
+        {
+            "batch": f"{index}/60",
+            "themes": [
+                {
+                    "direction": "positive" if theme_index % 2 == 0 else "negative",
+                    "term": f"主题{index}_{theme_index}",
+                    "count": 100 - theme_index,
+                    "summary": long_summary,
+                    "evidence_ids": [f"comment_{index}_{item}" for item in range(20)],
+                }
+                for theme_index in range(16)
+            ],
+            "suggestions": [{"direction": "产品", "text": "建议" * 160} for _ in range(8)],
+            "platform_notes": [{"platform": "汽车之家", "summary": "平台差异" * 160} for _ in range(4)],
+            "boss_brief": ["老板汇报" * 160 for _ in range(4)],
+        }
+        for index in range(60)
+    ]
+
+    prompt = _build_aggregate_prompt(model_name="风云T11", comments=comments, batch_payloads=batch_payloads)
+
+    assert len(prompt.encode("utf-8")) < 90_000
+    assert "长摘要" * 60 not in prompt
+    assert "comment_1_3" not in prompt
+
+
 def test_call_hermes_timeout_uses_concise_error_without_prompt(tmp_path: Path) -> None:
     fake_hermes = tmp_path / "hermes"
     fake_hermes.write_text("#!/bin/sh\nsleep 2\n", encoding="utf-8")
