@@ -273,21 +273,96 @@ def _json_default(value: object) -> str:
     return str(value)
 
 
+def _strip_hermes_stdout_noise(text: str) -> str:
+    lines = []
+    for line in text.strip().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("⚠️ Normalized model ") or stripped.startswith("Normalized model "):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _escape_unescaped_inner_quotes(text: str) -> str:
+    result: list[str] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if not in_string:
+            result.append(char)
+            if char == '"':
+                in_string = True
+            continue
+
+        if escaped:
+            result.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            result.append(char)
+            escaped = True
+            continue
+        if char != '"':
+            result.append(char)
+            continue
+
+        lookahead = index + 1
+        while lookahead < len(text) and text[lookahead] in " \t\r\n":
+            lookahead += 1
+        if lookahead >= len(text) or text[lookahead] in {":", ",", "}", "]"}:
+            result.append(char)
+            in_string = False
+        else:
+            result.append('\\"')
+    return "".join(result)
+
+
+def _json_candidate_slices(text: str) -> list[str]:
+    stripped = _strip_hermes_stdout_noise(text)
+    candidates = [stripped]
+    for fenced in re.finditer(r"```(?:json)?\s*(.*?)```", stripped, flags=re.DOTALL | re.IGNORECASE):
+        candidates.append(_strip_hermes_stdout_noise(fenced.group(1)))
+
+    start_positions = [position for position in (stripped.find("{"), stripped.find("[")) if position >= 0]
+    if start_positions:
+        start = min(start_positions)
+        opener = stripped[start]
+        closer = "}" if opener == "{" else "]"
+        end = stripped.rfind(closer)
+        if end > start:
+            candidates.append(stripped[start : end + 1])
+
+    unique_candidates: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        cleaned = candidate.strip()
+        if cleaned and cleaned not in seen:
+            unique_candidates.append(cleaned)
+            seen.add(cleaned)
+    return unique_candidates
+
+
+def _json_loads_lenient(candidate: str) -> Any:
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        repaired = _escape_unescaped_inner_quotes(candidate)
+        if repaired != candidate:
+            return json.loads(repaired)
+        raise
+
+
 def _extract_json(text: str) -> Any:
-    stripped = text.strip()
+    stripped = _strip_hermes_stdout_noise(text)
     if not stripped:
         raise ValueError("empty response")
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        pass
 
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", stripped, flags=re.DOTALL | re.IGNORECASE)
-    if fenced:
+    parse_error: Exception | None = None
+    for candidate in _json_candidate_slices(stripped):
         try:
-            return json.loads(fenced.group(1).strip())
-        except json.JSONDecodeError:
-            pass
+            return _json_loads_lenient(candidate)
+        except Exception as exc:
+            parse_error = exc
 
     start_positions = [position for position in (stripped.find("{"), stripped.find("[")) if position >= 0]
     if not start_positions:
@@ -315,7 +390,11 @@ def _extract_json(text: str) -> Any:
         elif char == closer:
             depth -= 1
             if depth == 0:
-                return json.loads(stripped[start : index + 1])
+                try:
+                    return _json_loads_lenient(stripped[start : index + 1])
+                except Exception as exc:
+                    parse_error = exc
+                    break
     raise ValueError("response JSON was not balanced")
 
 
@@ -408,7 +487,7 @@ def _build_json_repair_prompt(*, raw_response: str, parse_error: Exception) -> s
     return (
         "你是 JSON 语法修复器。下面是上一轮模型输出，json.loads 解析失败。\n"
         "任务：只修复 JSON 语法错误，保留原有字段、层级、文本含义和证据 id；不要新增事实，不要重新分析，"
-        "不要输出 Markdown、代码块或解释文字。\n"
+        "不要输出 Markdown、代码块或解释文字。字符串内部不要使用英文双引号；如需引用短语，请改用中文引号「」。\n"
         "允许修复的问题包括：缺失逗号、缺失引号、括号不配平、尾随逗号、非法控制字符。\n"
         f"解析错误：{parse_error}\n"
         "上一轮输出如下：\n"
@@ -437,7 +516,7 @@ def _build_batch_prompt(*, model_name: str, batch_index: int, total_batches: int
     normalized_comments = [_comment_for_llm(comment) for comment in comments]
     return (
         "你是汽车口碑分析Agent。只根据输入的脱敏原评论JSON分析，不引入外部资料。\n"
-        "只返回严格JSON，不要Markdown，不要解释。\n"
+        "只返回严格JSON，不要Markdown，不要解释。JSON 字符串内部不要使用英文双引号，引用短语请用中文引号「」。\n"
         "JSON schema: {\"themes\":[{\"direction\":\"positive|negative\",\"term\":\"主题词\",\"count\":数字,"
         "\"summary\":\"摘要\",\"evidence_ids\":[\"comment_id\"]}],\"suggestions\":[{\"direction\":\"方向\",\"text\":\"建议\"}],"
         "\"platform_notes\":[{\"platform\":\"平台\",\"summary\":\"差异\"}],\"boss_brief\":[\"一句话\"]}。\n"
@@ -627,6 +706,7 @@ def _build_aggregate_prompt(*, model_name: str, comments: list[dict[str, str]], 
     compacted_payloads = _fit_aggregate_payloads_to_command_limit(_compact_batch_payloads(batch_payloads))
     return (
         "你是汽车口碑分析Agent。请归并各批分析结果，生成最终结果。只返回严格JSON，不要Markdown。\n"
+        "JSON 字符串内部不要使用英文双引号，引用短语请用中文引号「」。\n"
         "JSON schema: {\"headline\":\"一句话结论\",\"executive_summary\":\"摘要\","
         "\"strength_blocks\":[{\"title\":\"核心好评\",\"summary\":\"...\",\"evidence_ids\":[\"...\"]}],"
         "\"weakness_blocks\":[{\"title\":\"核心槽点\",\"summary\":\"...\",\"evidence_ids\":[\"...\"]}],"

@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+pysqlite:///./vehicle_koubei.db"
     redis_url: str = "redis://redis:6379/0"
     worker_queue_name: str = "vehicle-koubei"
-    worker_job_timeout_seconds: int = 3600
+    worker_job_timeout_seconds: int = 7200
     artifact_root: str = "/srv/koubei/jobs"
     workspace_root: str = str(discover_workspace_root())
 

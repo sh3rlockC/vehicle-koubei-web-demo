@@ -210,6 +210,85 @@ class DatabaseJobStore:
         if event_type == "pipeline_completed":
             self._pipeline_completed(job_id=job_id, event=event)
 
+    def mark_job_failed(self, job_id: str, *, error_code: str, error_message: str) -> None:
+        now = utc_now()
+        now_iso = now.isoformat()
+        with self.engine.begin() as conn:
+            job_row = conn.execute(
+                text(
+                    """
+                    SELECT current_stage
+                    FROM jobs
+                    WHERE job_id = :job_id
+                    """
+                ),
+                {"job_id": job_id},
+            ).mappings().first()
+            current_stage = str(job_row["current_stage"]) if job_row and job_row["current_stage"] else None
+
+            stage_row = conn.execute(
+                text(
+                    """
+                    SELECT id, started_at
+                    FROM job_stage_runs
+                    WHERE job_id = :job_id AND status = 'running'
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ),
+                {"job_id": job_id},
+            ).mappings().first()
+            if stage_row is None and current_stage and current_stage not in {"completed", "failed", "completed_degraded"}:
+                stage_row = conn.execute(
+                    text(
+                        """
+                        SELECT id, started_at
+                        FROM job_stage_runs
+                        WHERE job_id = :job_id AND stage_name = :stage_name
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"job_id": job_id, "stage_name": current_stage},
+                ).mappings().first()
+
+            if stage_row is not None:
+                started_at = _as_datetime(stage_row["started_at"]) or now
+                duration_ms = int(max((now - started_at).total_seconds() * 1000, 0))
+                conn.execute(
+                    text(
+                        """
+                        UPDATE job_stage_runs
+                        SET status = 'failed',
+                            ended_at = :ended_at,
+                            duration_ms = :duration_ms,
+                            error_code = :error_code,
+                            error_message = :error_message
+                        WHERE id = :id
+                        """
+                    ),
+                    {
+                        "id": stage_row["id"],
+                        "ended_at": now_iso,
+                        "duration_ms": duration_ms,
+                        "error_code": error_code,
+                        "error_message": error_message,
+                    },
+                )
+
+            conn.execute(
+                text(
+                    """
+                    UPDATE jobs
+                    SET status = 'failed',
+                        current_stage = 'failed',
+                        finished_at = :finished_at
+                    WHERE job_id = :job_id
+                    """
+                ),
+                {"job_id": job_id, "finished_at": now_iso},
+            )
+
     def _next_attempt_no(self, conn, job_id: str, stage_name: str) -> int:
         current = conn.execute(
             text(

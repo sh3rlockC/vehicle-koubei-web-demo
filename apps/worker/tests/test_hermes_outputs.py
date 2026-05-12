@@ -16,6 +16,7 @@ from worker_app.hermes_outputs import (
     _build_aggregate_prompt,
     _build_batch_prompt,
     _call_hermes,
+    _extract_json,
     _runtime_provider,
     extract_whitelisted_comments,
     generate_outputs,
@@ -237,6 +238,22 @@ def test_aggregate_prompt_stays_below_command_argument_limit_for_many_batches() 
     assert len(prompt.encode("utf-8")) < 90_000
     assert "长摘要" * 60 not in prompt
     assert "comment_1_3" not in prompt
+
+
+def test_extract_json_cleans_hermes_warning_fence_and_inner_quotes() -> None:
+    raw_response = (
+        "⚠️ Normalized model 'deepseekv4pro' to 'deepseek-chat' for deepseek.\n"
+        "```json\n"
+        '{"headline":"风云T11空间好评突出",'
+        '"weakness_blocks":[{"title":"第三排舒适性","summary":"用户认为第三排像"坐小板凳"，'
+        '外观像"小揽胜"，需要优化。","evidence_ids":["autohome_0001"]}]}\n'
+        "```"
+    )
+
+    payload = _extract_json(raw_response)
+
+    assert payload["headline"] == "风云T11空间好评突出"
+    assert payload["weakness_blocks"][0]["summary"] == '用户认为第三排像"坐小板凳"，外观像"小揽胜"，需要优化。'
 
 
 def test_call_hermes_timeout_uses_concise_error_without_prompt(tmp_path: Path) -> None:

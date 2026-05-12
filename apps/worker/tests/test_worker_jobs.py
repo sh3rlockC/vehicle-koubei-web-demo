@@ -58,6 +58,56 @@ def test_run_job_uses_configured_stage_runner(monkeypatch, tmp_path: Path) -> No
     assert result["status"] == "completed"
 
 
+def test_run_job_marks_failed_when_pipeline_raises(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {"calls": []}
+
+    class FakeStore:
+        def __init__(self, _database_url: str):
+            pass
+
+        def fetch_job_inputs(self, _job_id: str):
+            return SimpleNamespace(
+                model_name="测试车",
+                autohome_series_id="8089",
+                dongchedi_series_id="25398",
+            )
+
+        def handle_pipeline_event(self, _job_id: str, _event: dict):
+            pass
+
+        def mark_job_failed(self, job_id: str, *, error_code: str, error_message: str) -> None:
+            captured["calls"].append(("failed", job_id, error_code, error_message))
+
+    def fake_run_pipeline(*_args, **_kwargs):
+        raise TimeoutError("Task exceeded maximum timeout value (3600 seconds)")
+
+    monkeypatch.setattr(worker_jobs, "DatabaseJobStore", FakeStore)
+    monkeypatch.setattr(worker_jobs, "ensure_job_dirs", lambda _root, _job_id: tmp_path)
+    monkeypatch.setattr(worker_jobs, "build_stage_commands", lambda **_kwargs: [])
+    monkeypatch.setattr(worker_jobs, "build_stage_runner", lambda: "runner-sentinel")
+    monkeypatch.setattr(worker_jobs, "run_pipeline", fake_run_pipeline)
+
+    result = worker_jobs.run_job(job_id="job_timeout", database_url="sqlite://", artifact_root=str(tmp_path))
+
+    assert captured["calls"] == [
+        (
+            "failed",
+            "job_timeout",
+            "Task exceeded maximum timeout value (3600 seconds)",
+            "Task exceeded maximum timeout value (3600 seconds)",
+        )
+    ]
+    assert result == {
+        "job_id": "job_timeout",
+        "status": "failed",
+        "degraded": False,
+        "completed_stages": [],
+        "failed_stage": None,
+        "error_code": "Task exceeded maximum timeout value (3600 seconds)",
+        "error_message": "Task exceeded maximum timeout value (3600 seconds)",
+    }
+
+
 def test_run_time_report_invokes_generator_and_persists_completion(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {"calls": []}
 

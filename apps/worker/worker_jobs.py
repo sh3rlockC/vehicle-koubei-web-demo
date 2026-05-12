@@ -45,12 +45,26 @@ def run_job(
         autohome_series_id=job_inputs.autohome_series_id,
         dongchedi_series_id=job_inputs.dongchedi_series_id,
     )
-    pipeline_result = run_pipeline(
-        context,
-        stage_commands,
-        build_stage_runner(),
-        observer=lambda event: store.handle_pipeline_event(job_id, event),
-    )
+    try:
+        pipeline_result = run_pipeline(
+            context,
+            stage_commands,
+            build_stage_runner(),
+            observer=lambda event: store.handle_pipeline_event(job_id, event),
+        )
+    except Exception as exc:
+        error_message = str(exc) or exc.__class__.__name__
+        error_code = _error_code_from_exception(exc)
+        store.mark_job_failed(job_id, error_code=error_code, error_message=error_message)
+        return {
+            "job_id": job_id,
+            "status": "failed",
+            "degraded": False,
+            "completed_stages": [],
+            "failed_stage": None,
+            "error_code": error_code,
+            "error_message": error_message,
+        }
     return {
         "job_id": job_id,
         "status": pipeline_result.status,
