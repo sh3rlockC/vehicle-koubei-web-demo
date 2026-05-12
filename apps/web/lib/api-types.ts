@@ -115,6 +115,80 @@ export type JobResultResponse = {
   qa_available: boolean;
 };
 
+export type CommentDailyCount = {
+  date: string;
+  count: number;
+};
+
+export type JobCommentSummaryResponse = {
+  job_id: string;
+  total_count: number;
+  dated_count: number;
+  undated_count: number;
+  date_min: string | null;
+  date_max: string | null;
+  daily_counts: CommentDailyCount[];
+  platform_counts: Record<string, number>;
+};
+
+export type JobCommentItem = {
+  comment_id: string;
+  platform: string;
+  date: string;
+  model_name: string;
+  positive_text: string;
+  negative_text: string;
+  full_text: string;
+};
+
+export type JobCommentPageResponse = {
+  job_id: string;
+  start_date: string;
+  end_date: string;
+  total: number;
+  page: number;
+  page_size: number;
+  items: JobCommentItem[];
+};
+
+export type CreateTimeReportRequest = {
+  start_date: string;
+  end_date: string;
+};
+
+export type TimeReportArtifact = {
+  name: string;
+  path: string;
+  type: string;
+};
+
+export type TimeReportResponse = {
+  report_id: string;
+  job_id: string;
+  model_name: string;
+  date_range: {
+    start_date: string;
+    end_date: string;
+  };
+  status: string;
+  sample_count: number;
+  platform_counts: Record<string, number>;
+  source: string | null;
+  report_json: Record<string, unknown> | null;
+  artifacts: TimeReportArtifact[];
+  zip_url: string;
+  error_code: string | null;
+  error_message: string | null;
+  queue_job_id: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+};
+
+export type TimeReportListResponse = {
+  items: TimeReportResponse[];
+};
+
 export type QaCitation = {
   chunk_id: string;
   source_type: string;

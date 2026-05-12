@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def make_client(tmp_path: Path) -> TestClient:
     return TestClient(app)
 
 
-def seed_result_job(job_id: str) -> None:
+def seed_result_job(job_id: str, *, qa_chunks_path: Path | None = None) -> None:
     fixture_root = Path("/Users/xyc/Documents/codexwork/data/26.4.7/风云X3 PLUS")
     session = get_session_local()()
     try:
@@ -58,17 +59,59 @@ def seed_result_job(job_id: str) -> None:
         )
         session.add(job)
         session.flush()
-        session.add(
+        artifacts = [
             JobArtifact(
                 job_id=job_id,
                 artifact_type="excel",
                 artifact_path=str(fixture_root / "风云X3 PLUS_双平台口碑摘要.xlsx"),
                 source_stage="summarizing",
             )
-        )
+        ]
+        if qa_chunks_path is not None:
+            artifacts.append(
+                JobArtifact(
+                    job_id=job_id,
+                    artifact_type="json",
+                    artifact_path=str(qa_chunks_path),
+                    source_stage="generating_hermes_outputs",
+                )
+            )
+        session.add_all(artifacts)
         session.commit()
     finally:
         session.close()
+
+
+def test_job_qa_uses_hermes_generated_chunks_when_available(tmp_path: Path) -> None:
+    qa_chunks = tmp_path / "qa_chunks.json"
+    qa_chunks.write_text(
+        json.dumps(
+            [
+                {
+                    "chunk_id": "hermes_strength_1",
+                    "source_type": "hermes_evidence",
+                    "text": "核心好评：用户最满意空间灵活、配置齐全。",
+                    "tags": ["strength", "满意", "风云X3 PLUS"],
+                    "metadata": {"source": "hermes"},
+                }
+            ],
+            ensure_ascii=False,
+        )
+    )
+    client = make_client(tmp_path)
+    seed_result_job("job_qa_hermes_chunks", qa_chunks_path=qa_chunks)
+    verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify.status_code == 200
+
+    response = client.post(
+        "/api/jobs/job_qa_hermes_chunks/qa",
+        json={"question": "大家最满意什么？"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["insufficient_evidence"] is False
+    assert "空间灵活" in payload["answer"]
 
 
 def test_result_endpoint_marks_qa_available_after_chunk_build(tmp_path: Path) -> None:

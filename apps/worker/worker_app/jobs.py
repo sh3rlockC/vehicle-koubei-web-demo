@@ -119,12 +119,13 @@ def _stage_success(
     observer: PipelineObserver | None,
 ) -> None:
     completed_stages.append(stage.name)
+    stage_status = "degraded" if result.status == "degraded" else "success"
     snapshot = progress_sink.update(
         stage=stage.name,
-        status="success",
-        message=f"completed {stage.name}",
+        status=stage_status,
+        message=f"completed {stage.name}" if stage_status == "success" else f"completed {stage.name} with degraded output",
         overall_percent=int(stage_index * 100 / total),
-        degraded=degraded,
+        degraded=degraded or stage_status == "degraded",
     )
     _emit(
         observer,
@@ -423,6 +424,8 @@ def run_pipeline(
         )
         try:
             stage_result = runner(resolved_stage, job_paths, progress_sink)
+            if stage_result.status == "degraded":
+                degraded = True
             _stage_success(
                 context=context,
                 stage=stage,

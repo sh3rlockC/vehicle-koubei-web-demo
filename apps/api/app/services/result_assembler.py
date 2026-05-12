@@ -21,6 +21,10 @@ def _artifact_type_label(path: str) -> str:
         return "summary_excel"
     if lower_path.endswith("_词云词项清单.xlsx"):
         return "wordcloud_terms_excel"
+    if lower_path.endswith("final_report.json"):
+        return "final_report_json"
+    if lower_path.endswith("qa_chunks.json"):
+        return "qa_chunks_json"
     if lower_path.endswith("优点词云.png"):
         return "wordcloud_positive"
     if lower_path.endswith("槽点词云.png"):
@@ -58,9 +62,17 @@ def assemble_job_result(db: Session, settings: Settings, job_id: str) -> dict | 
     ]
 
     summary_artifact = next((item for item in artifact_items if item["type"] == "summary_excel"), None)
+    final_report_artifact = next((item for item in artifact_items if item["type"] == "final_report_json"), None)
+    qa_chunks_artifact = next((item for item in artifact_items if item["type"] == "qa_chunks_json"), None)
     summary_data = read_summary_workbook(summary_artifact["path"]) if summary_artifact else None
     ai_report = (
-        ensure_ai_report(db, job_id=job.job_id, summary_path=summary_artifact["path"], model_name=job.model_name)
+        ensure_ai_report(
+            db,
+            job_id=job.job_id,
+            summary_path=summary_artifact["path"],
+            model_name=job.model_name,
+            report_path=final_report_artifact["path"] if final_report_artifact else None,
+        )
         if summary_artifact
         else (
             db.query(JobAIReport)
@@ -70,7 +82,13 @@ def assemble_job_result(db: Session, settings: Settings, job_id: str) -> dict | 
         )
     )
     if summary_artifact:
-        ensure_qa_chunks(db, job_id=job.job_id, summary_path=summary_artifact["path"], model_name=job.model_name)
+        ensure_qa_chunks(
+            db,
+            job_id=job.job_id,
+            summary_path=summary_artifact["path"],
+            model_name=job.model_name,
+            hermes_chunks_path=qa_chunks_artifact["path"] if qa_chunks_artifact else None,
+        )
 
     qa_available = (
         db.query(JobQAChunk.id)

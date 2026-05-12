@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import quote
 import zipfile
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, Response
 from redis.exceptions import RedisError
 from rq import Queue
@@ -15,17 +15,29 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.db import get_db
-from app.models import Job, JobCandidate, JobStageRun
+from app.models import Job, JobCandidate, JobStageRun, JobTimeReport
 from app.models import JobArtifact
 from app.schemas import (
+    CreateTimeReportRequest,
     CreateJobRequest,
     CreateJobResponse,
+    JobCommentPageResponse,
+    JobCommentSummaryResponse,
     JobQARequest,
     JobQAResponse,
     JobOverviewResponse,
     JobProgressResponse,
     JobResultResponse,
     StageStatusItem,
+    TimeReportListResponse,
+    TimeReportResponse,
+)
+from app.services.comment_time_reports import (
+    comment_summary,
+    extract_job_comments,
+    filter_comments_by_date,
+    platform_counts,
+    time_report_payload,
 )
 from app.services.confirmed_vehicle_series import upsert_confirmed_vehicle_series
 from app.services.job_queue import get_job_queue
@@ -53,7 +65,7 @@ def _clamp_percent(value: object) -> int | None:
 
 
 def _read_stage_progress(settings: Settings, job_id: str, stage_name: str, stage_status: str) -> tuple[int | None, str | None]:
-    if stage_name not in {"collecting_autohome", "collecting_dcd"}:
+    if stage_name not in {"collecting_autohome", "collecting_dcd", "generating_hermes_outputs"}:
         return None, None
 
     progress_path = settings.artifact_root_path / job_id / "progress" / f"{stage_name}.progress.json"
@@ -83,11 +95,16 @@ def _read_stage_progress(settings: Settings, job_id: str, stage_name: str, stage
 
 def _is_result_bundle_artifact(path: str) -> bool:
     lower_path = path.lower()
-    return lower_path.endswith((".xlsx", ".png"))
+    return lower_path.endswith((".xlsx", ".png")) or lower_path.endswith("final_report.json")
 
 
 def _is_wordcloud_terms_artifact(path: str) -> bool:
     return path.lower().endswith("_词云词项清单.xlsx")
+
+
+def _is_time_report_artifact(path: str) -> bool:
+    lower_path = path.lower()
+    return lower_path.endswith((".xlsx", ".png", ".json"))
 
 
 def _safe_zip_name(path: Path, seen: set[str]) -> str:
@@ -259,6 +276,7 @@ def get_job_progress(
         "collecting_autohome": 25,
         "collecting_dcd": 40,
         "postprocessing": 55,
+        "generating_hermes_outputs": 82,
         "summarizing": 70,
         "rendering_wordcloud": 82,
         "generating_ai_report": 92,
@@ -301,6 +319,140 @@ def get_job_result(
     if payload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
     return JobResultResponse.model_validate(payload)
+
+
+@router.get("/{job_id}/comments/summary", response_model=JobCommentSummaryResponse)
+def get_job_comment_summary(
+    job_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> JobCommentSummaryResponse:
+    _ensure_session(request, settings)
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+    comments = extract_job_comments(db, settings, job)
+    return JobCommentSummaryResponse.model_validate(comment_summary(job_id, comments))
+
+
+@router.get("/{job_id}/comments", response_model=JobCommentPageResponse)
+def get_job_comments(
+    job_id: str,
+    request: Request,
+    start_date: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    end_date: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> JobCommentPageResponse:
+    _ensure_session(request, settings)
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+    comments = filter_comments_by_date(extract_job_comments(db, settings, job), start_date=start_date, end_date=end_date)
+    start = (page - 1) * page_size
+    items = [comment.public_dict() for comment in comments[start : start + page_size]]
+    return JobCommentPageResponse(
+        job_id=job_id,
+        start_date=start_date,
+        end_date=end_date,
+        total=len(comments),
+        page=page,
+        page_size=page_size,
+        items=items,
+    )
+
+
+@router.post("/{job_id}/time-reports", response_model=TimeReportResponse)
+def create_time_report(
+    job_id: str,
+    payload: CreateTimeReportRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    queue: Queue = Depends(get_job_queue),
+) -> TimeReportResponse:
+    _ensure_session(request, settings)
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+    comments = filter_comments_by_date(
+        extract_job_comments(db, settings, job),
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+    )
+    if not comments:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该时间范围内没有可分析评论")
+
+    report = JobTimeReport(
+        job_id=job.job_id,
+        model_name=job.model_name,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        status="queued",
+        sample_count=len(comments),
+        platform_counts=platform_counts(comments),
+    )
+    db.add(report)
+    db.flush()
+
+    try:
+        queue_job = queue.enqueue(
+            "worker_jobs.run_time_report",
+            kwargs={
+                "report_id": report.report_id,
+                "database_url": settings.database_url,
+                "artifact_root": settings.artifact_root,
+            },
+            job_timeout=settings.worker_job_timeout_seconds,
+        )
+    except RedisError as exc:
+        report.status = "failed"
+        report.error_code = "queue_unavailable"
+        report.error_message = QUEUE_UNAVAILABLE_MESSAGE
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=QUEUE_UNAVAILABLE_MESSAGE) from exc
+
+    report.queue_job_id = queue_job.id
+    db.commit()
+    db.refresh(report)
+    return TimeReportResponse.model_validate(time_report_payload(report))
+
+
+@router.get("/{job_id}/time-reports", response_model=TimeReportListResponse)
+def list_time_reports(
+    job_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> TimeReportListResponse:
+    _ensure_session(request, settings)
+    if db.get(Job, job_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+    reports = (
+        db.query(JobTimeReport)
+        .filter(JobTimeReport.job_id == job_id)
+        .order_by(JobTimeReport.created_at.desc())
+        .all()
+    )
+    return TimeReportListResponse(items=[TimeReportResponse.model_validate(time_report_payload(report)) for report in reports])
+
+
+@router.get("/{job_id}/time-reports/{report_id}", response_model=TimeReportResponse)
+def get_time_report(
+    job_id: str,
+    report_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> TimeReportResponse:
+    _ensure_session(request, settings)
+    report = db.get(JobTimeReport, report_id)
+    if report is None or report.job_id != job_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="time report not found")
+    return TimeReportResponse.model_validate(time_report_payload(report))
 
 
 @router.post("/{job_id}/qa", response_model=JobQAResponse)
@@ -406,4 +558,40 @@ def download_result_bundle(
         content=buffer.getvalue(),
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename=result_bundle.zip; filename*=UTF-8''{encoded_filename}"},
+    )
+
+
+@router.get("/{job_id}/time-reports/{report_id}/artifacts.zip")
+def download_time_report_bundle(
+    job_id: str,
+    report_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    _ensure_session(request, settings)
+    report = db.get(JobTimeReport, report_id)
+    if report is None or report.job_id != job_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="time report not found")
+
+    paths = [
+        Path(path)
+        for path in (report.artifact_paths or [])
+        if _is_time_report_artifact(str(path)) and Path(path).exists()
+    ]
+    if not paths:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="no downloadable time report artifacts")
+
+    buffer = BytesIO()
+    seen_names: set[str] = set()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in paths:
+            archive.write(path, arcname=_safe_zip_name(path, seen_names))
+
+    filename = f"{report.model_name}_{report.start_date}_{report.end_date}_时间版一页纸.zip"
+    encoded_filename = quote(filename)
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=time_report.zip; filename*=UTF-8''{encoded_filename}"},
     )

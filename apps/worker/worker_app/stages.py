@@ -11,6 +11,7 @@ from worker_app.dependencies import discover_manifest_path, get_workspace_root, 
 
 DEPENDENCY_MANIFEST = discover_manifest_path(source_path=Path(__file__))
 POSTPROCESS_BRIDGE = Path(__file__).resolve().with_name("postprocess_bridge.py")
+HERMES_OUTPUTS = Path(__file__).resolve().with_name("hermes_outputs.py")
 WORDCLOUD_FONT_PATH = os.getenv("WORDCLOUD_FONT_PATH", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
 
 
@@ -84,9 +85,12 @@ def build_stage_commands(
     prepared_zj_output = job_paths.outputs.postprocess / f"{model_name}_ZJ预处理口碑.xlsx"
     dual_output = job_paths.outputs.postprocess / f"{model_name}_双平台口碑汇总.xlsx"
     summary_output = job_paths.outputs.summary / f"{model_name}_双平台口碑摘要.xlsx"
+    wordcloud_terms_output = job_paths.outputs.wordcloud / f"{model_name}_词云词项清单.xlsx"
+    final_report_output = job_paths.outputs.ai / "final_report.json"
+    qa_chunks_output = job_paths.outputs.ai / "qa_chunks.json"
     autohome_progress = job_paths.progress / "collecting_autohome.progress.json"
     dcd_progress = job_paths.progress / "collecting_dcd.progress.json"
-    summary_progress = job_paths.progress / "summarizing.progress.json"
+    hermes_progress = job_paths.progress / "generating_hermes_outputs.progress.json"
 
     auto_dep = dependency_map["auto-koubei-collector"]
     dcd_dep = dependency_map["dcd-koubei-collector"]
@@ -94,31 +98,60 @@ def build_stage_commands(
     summary_dep = dependency_map["koubei-keyword-summary-skill"]
     wordcloud_dep = dependency_map["koubei-wordcloud"]
 
-    summary_dual_command = [
+    hermes_dual_command = [
         sys.executable,
-        summary_dep["entrypoint"],
+        str(HERMES_OUTPUTS),
         "--autohome-input",
         str(zj_output),
         "--dcd-input",
         str(dcd_output),
-        "--output",
+        "--postprocess-input",
+        str(dual_output),
+        "--summary-output",
         str(summary_output),
+        "--terms-output",
+        str(wordcloud_terms_output),
+        "--wordcloud-output-dir",
+        str(job_paths.outputs.wordcloud),
+        "--final-report-output",
+        str(final_report_output),
+        "--qa-chunks-output",
+        str(qa_chunks_output),
         "--model-name",
         model_name,
         "--progress-file",
-        str(summary_progress),
-    ]
-    summary_fallback_command = [
-        sys.executable,
+        str(hermes_progress),
+        "--summary-script",
         summary_dep["entrypoint"],
-        "--input",
+        "--wordcloud-script",
+        wordcloud_dep["entrypoint"],
+        *build_wordcloud_font_args(),
+    ]
+    hermes_single_platform_command = [
+        sys.executable,
+        str(HERMES_OUTPUTS),
+        "--autohome-input",
         str(zj_output),
-        "--output",
+        "--summary-output",
         str(summary_output),
+        "--terms-output",
+        str(wordcloud_terms_output),
+        "--wordcloud-output-dir",
+        str(job_paths.outputs.wordcloud),
+        "--final-report-output",
+        str(final_report_output),
+        "--qa-chunks-output",
+        str(qa_chunks_output),
         "--model-name",
         model_name,
         "--progress-file",
-        str(summary_progress),
+        str(hermes_progress),
+        "--summary-script",
+        summary_dep["entrypoint"],
+        "--wordcloud-script",
+        wordcloud_dep["entrypoint"],
+        "--single-platform",
+        *build_wordcloud_font_args(),
     ]
 
     return [
@@ -199,41 +232,25 @@ def build_stage_commands(
             optional_artifacts=(str(prepared_zj_output),),
         ),
         StageCommand(
-            name="summarizing",
-            dependency_name="koubei-keyword-summary-skill",
-            cwd=Path(summary_dep["path"]),
-            command=summary_dual_command,
+            name="generating_hermes_outputs",
+            dependency_name="hermes-agent",
+            cwd=HERMES_OUTPUTS.parent,
+            command=hermes_dual_command,
             core=True,
-            fallback_command=summary_fallback_command,
+            fallback_command=hermes_single_platform_command,
             expected_artifacts=(
                 str(summary_output),
                 str(summary_output.with_suffix(".validation.json")),
-                str(summary_progress),
+                str(hermes_progress),
+                str(wordcloud_terms_output),
+                str(final_report_output),
+                str(qa_chunks_output),
             ),
-            progress_file=str(summary_progress),
-        ),
-        StageCommand(
-            name="rendering_wordcloud",
-            dependency_name="koubei-wordcloud",
-            cwd=Path(wordcloud_dep["path"]),
-            command=[
-                sys.executable,
-                wordcloud_dep["entrypoint"],
-                "--input",
-                str(summary_output),
-                "--output-dir",
-                str(job_paths.outputs.wordcloud),
-                "--model-name",
-                model_name,
-                *build_wordcloud_font_args(),
-                "--json",
-            ],
-            core=False,
-            expected_artifacts=(str(job_paths.outputs.wordcloud / f"{model_name}_词云词项清单.xlsx"),),
             optional_artifacts=(
                 str(job_paths.outputs.wordcloud / f"{model_name}_优点词云.png"),
                 str(job_paths.outputs.wordcloud / f"{model_name}_槽点词云.png"),
             ),
+            progress_file=str(hermes_progress),
             parse_json_stdout=True,
         ),
     ]

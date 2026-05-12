@@ -15,6 +15,10 @@ def new_job_id() -> str:
     return f"job_{utc_now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
 
 
+def new_time_report_id() -> str:
+    return f"time_report_{utc_now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -40,6 +44,7 @@ class Job(Base):
     artifacts: Mapped[list["JobArtifact"]] = relationship(back_populates="job", cascade="all, delete-orphan")
     ai_reports: Mapped[list["JobAIReport"]] = relationship(back_populates="job", cascade="all, delete-orphan")
     qa_chunks: Mapped[list["JobQAChunk"]] = relationship(back_populates="job", cascade="all, delete-orphan")
+    time_reports: Mapped[list["JobTimeReport"]] = relationship(back_populates="job", cascade="all, delete-orphan")
 
 
 class JobCandidate(Base):
@@ -128,6 +133,30 @@ class JobQAChunk(Base):
     metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
     job: Mapped[Job] = relationship(back_populates="qa_chunks")
+
+
+class JobTimeReport(Base):
+    __tablename__ = "job_time_reports"
+
+    report_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_time_report_id)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id", ondelete="CASCADE"), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    start_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    end_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    platform_counts: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    report_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    artifact_paths: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    queue_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    job: Mapped[Job] = relationship(back_populates="time_reports")
 
 
 class VehicleResolveCache(Base):

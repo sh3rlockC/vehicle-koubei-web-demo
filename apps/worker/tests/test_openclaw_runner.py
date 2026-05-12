@@ -125,6 +125,14 @@ def test_openclaw_settings_reads_stage_specific_agent_ids_from_env(monkeypatch: 
     assert settings.agent_id_for_stage("summarizing") == "main"
 
 
+def test_openclaw_settings_routes_both_collectors_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENCLAW_ADAPTER_STAGES", raising=False)
+
+    settings = OpenClawSettings.from_env()
+
+    assert settings.stages == ("collecting_autohome", "collecting_dcd")
+
+
 def test_openclaw_gateway_connect_sends_device_identity_when_available(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

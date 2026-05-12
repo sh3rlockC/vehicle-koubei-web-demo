@@ -12,6 +12,7 @@ APPROVED_JOB_STATUSES = [
     "collecting_autohome",
     "collecting_dcd",
     "postprocessing",
+    "generating_hermes_outputs",
     "summarizing",
     "rendering_wordcloud",
     "generating_ai_report",
@@ -168,6 +169,82 @@ class JobResultResponse(BaseModel):
     ai_report: dict | None = None
     ai_available: bool
     qa_available: bool
+
+
+class CommentDailyCountResponse(BaseModel):
+    date: str
+    count: int
+
+
+class JobCommentSummaryResponse(BaseModel):
+    job_id: str
+    total_count: int
+    dated_count: int
+    undated_count: int
+    date_min: str | None = None
+    date_max: str | None = None
+    daily_counts: list[CommentDailyCountResponse] = Field(default_factory=list)
+    platform_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class JobCommentItemResponse(BaseModel):
+    comment_id: str
+    platform: str
+    date: str
+    model_name: str
+    positive_text: str
+    negative_text: str
+    full_text: str
+
+
+class JobCommentPageResponse(BaseModel):
+    job_id: str
+    start_date: str
+    end_date: str
+    total: int
+    page: int
+    page_size: int
+    items: list[JobCommentItemResponse] = Field(default_factory=list)
+
+
+class CreateTimeReportRequest(BaseModel):
+    start_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class TimeReportDateRangeResponse(BaseModel):
+    start_date: str
+    end_date: str
+
+
+class TimeReportArtifactResponse(BaseModel):
+    name: str
+    path: str
+    type: str
+
+
+class TimeReportResponse(BaseModel):
+    report_id: str
+    job_id: str
+    model_name: str
+    date_range: TimeReportDateRangeResponse
+    status: str
+    sample_count: int
+    platform_counts: dict[str, int] = Field(default_factory=dict)
+    source: str | None = None
+    report_json: dict | None = None
+    artifacts: list[TimeReportArtifactResponse] = Field(default_factory=list)
+    zip_url: str
+    error_code: str | None = None
+    error_message: str | None = None
+    queue_job_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
+
+
+class TimeReportListResponse(BaseModel):
+    items: list[TimeReportResponse] = Field(default_factory=list)
 
 
 class JobQARequest(BaseModel):

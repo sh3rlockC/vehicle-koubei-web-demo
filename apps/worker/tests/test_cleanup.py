@@ -76,6 +76,25 @@ def create_cleanup_schema(db_path: Path) -> None:
                 tags TEXT NOT NULL,
                 metadata_json TEXT NOT NULL
             );
+            CREATE TABLE job_time_reports (
+                report_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                platform_counts TEXT,
+                report_json TEXT,
+                artifact_paths TEXT,
+                source TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                queue_job_id TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                completed_at TEXT
+            );
             """
         )
         connection.commit()
@@ -136,6 +155,15 @@ def insert_job(
     connection.execute(
         "INSERT INTO job_qa_chunks (job_id, chunk_id, source_type, text, tags, metadata_json) VALUES (?, ?, ?, ?, ?, ?)",
         (job_id, "chunk_1", "summary", "comment text", "[]", "{}"),
+    )
+    connection.execute(
+        """
+        INSERT INTO job_time_reports (
+            report_id, job_id, model_name, start_date, end_date, status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (f"time_{job_id}", job_id, "风云X3 PLUS", "2026-03-01", "2026-03-31", "completed", as_db_datetime(created_at), as_db_datetime(created_at)),
     )
 
 
@@ -217,6 +245,7 @@ def test_cleanup_removes_expired_job_data_but_keeps_metadata(tmp_path: Path) -> 
         assert connection.execute("SELECT COUNT(*) FROM job_artifacts WHERE job_id = ?", ("job_old",)).fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM job_ai_reports WHERE job_id = ?", ("job_old",)).fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM job_qa_chunks WHERE job_id = ?", ("job_old",)).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM job_time_reports WHERE job_id = ?", ("job_old",)).fetchone()[0] == 0
         assert connection.execute("SELECT status FROM jobs WHERE job_id = ?", ("job_recent",)).fetchone()[0] == "completed"
         assert connection.execute("SELECT status FROM jobs WHERE job_id = ?", ("job_running",)).fetchone()[0] == "collecting_autohome"
         assert connection.execute("SELECT status FROM jobs WHERE job_id = ?", ("job_failed_recent",)).fetchone()[0] == "failed"

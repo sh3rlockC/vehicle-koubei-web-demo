@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import JSON as SAJSON
+from sqlalchemy import bindparam, create_engine, text
 
 
 def utc_now() -> datetime:
@@ -42,6 +43,15 @@ class WorkerJobInputs:
     dongchedi_series_id: str
 
 
+@dataclass(frozen=True)
+class TimeReportInputs:
+    report_id: str
+    job_id: str
+    model_name: str
+    start_date: str
+    end_date: str
+
+
 class DatabaseJobStore:
     def __init__(self, database_url: str):
         self.engine = create_engine(database_url, future=True, **_engine_kwargs(database_url))
@@ -70,6 +80,104 @@ class DatabaseJobStore:
             autohome_series_id=str(series_by_platform["autohome"]),
             dongchedi_series_id=str(series_by_platform["dongchedi"]),
         )
+
+    def fetch_time_report_inputs(self, report_id: str) -> TimeReportInputs:
+        query = text(
+            """
+            SELECT report_id, job_id, model_name, start_date, end_date
+            FROM job_time_reports
+            WHERE report_id = :report_id
+            """
+        )
+        with self.engine.begin() as conn:
+            row = conn.execute(query, {"report_id": report_id}).mappings().first()
+        if row is None:
+            raise RuntimeError(f"time report not found: {report_id}")
+        return TimeReportInputs(
+            report_id=str(row["report_id"]),
+            job_id=str(row["job_id"]),
+            model_name=str(row["model_name"]),
+            start_date=str(row["start_date"]),
+            end_date=str(row["end_date"]),
+        )
+
+    def mark_time_report_running(self, report_id: str) -> None:
+        now = utc_now_iso()
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE job_time_reports
+                    SET status = 'running',
+                        error_code = NULL,
+                        error_message = NULL,
+                        updated_at = :updated_at
+                    WHERE report_id = :report_id
+                    """
+                ),
+                {"report_id": report_id, "updated_at": now},
+            )
+
+    def mark_time_report_completed(self, report_id: str, result: dict[str, Any]) -> None:
+        now = utc_now_iso()
+        statement = text(
+            """
+            UPDATE job_time_reports
+            SET status = 'completed',
+                sample_count = :sample_count,
+                platform_counts = :platform_counts,
+                report_json = :report_json,
+                artifact_paths = :artifact_paths,
+                source = :source,
+                error_code = NULL,
+                error_message = NULL,
+                updated_at = :updated_at,
+                completed_at = :completed_at
+            WHERE report_id = :report_id
+            """
+        ).bindparams(
+            bindparam("platform_counts", type_=SAJSON),
+            bindparam("report_json", type_=SAJSON),
+            bindparam("artifact_paths", type_=SAJSON),
+        )
+        with self.engine.begin() as conn:
+            conn.execute(
+                statement,
+                {
+                    "report_id": report_id,
+                    "sample_count": int(result.get("sample_count") or 0),
+                    "platform_counts": result.get("platform_counts") or {},
+                    "report_json": result.get("report_json") or {},
+                    "artifact_paths": result.get("artifact_paths") or [],
+                    "source": result.get("source") or "hermes",
+                    "updated_at": now,
+                    "completed_at": now,
+                },
+            )
+
+    def mark_time_report_failed(self, report_id: str, *, error_code: str, error_message: str) -> None:
+        now = utc_now_iso()
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE job_time_reports
+                    SET status = 'failed',
+                        error_code = :error_code,
+                        error_message = :error_message,
+                        updated_at = :updated_at,
+                        completed_at = :completed_at
+                    WHERE report_id = :report_id
+                    """
+                ),
+                {
+                    "report_id": report_id,
+                    "error_code": error_code,
+                    "error_message": error_message,
+                    "updated_at": now,
+                    "completed_at": now,
+                },
+            )
 
     def mark_job_enqueued(self, *, job_id: str, queue_job_id: str | None) -> None:
         now = utc_now_iso()
@@ -242,7 +350,7 @@ class DatabaseJobStore:
                 },
             )
 
-            if status == "success" and result is not None:
+            if status in {"success", "degraded"} and result is not None:
                 conn.execute(
                     text("DELETE FROM job_artifacts WHERE job_id = :job_id AND source_stage = :source_stage"),
                     {"job_id": job_id, "source_stage": stage_name},
