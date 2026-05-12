@@ -239,3 +239,7 @@ def test_build_stage_commands_uses_hermes_outputs_after_postprocess(monkeypatch,
     assert str(job_paths.outputs.ai / "qa_chunks.json") in hermes_stage.expected_artifacts
     assert "--summary-script" in hermes_stage.command
     assert "--wordcloud-script" in hermes_stage.command
+    dcd_fallback = hermes_stage.fallback_commands_by_stage["collecting_dcd"]
+    assert "--single-platform" in dcd_fallback
+    assert "--dcd-input" in dcd_fallback
+    assert str(job_paths.outputs.raw / "DCD口碑_测试车.xlsx") in dcd_fallback

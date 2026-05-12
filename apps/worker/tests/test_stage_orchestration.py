@@ -171,6 +171,53 @@ def test_pipeline_falls_back_to_single_platform_once(tmp_path: Path) -> None:
     assert ["echo", "single-summary"] in seen_commands
 
 
+def test_pipeline_falls_back_to_dcd_when_autohome_fails(tmp_path: Path) -> None:
+    stage_commands = [
+        make_stage("collecting_autohome"),
+        make_stage("collecting_dcd"),
+        make_stage("postprocessing", core=True),
+        make_stage("summarizing"),
+    ]
+
+    seen_commands: list[list[str]] = []
+
+    stage_commands[2] = StageCommand(
+        name="postprocessing",
+        dependency_name="postprocessing",
+        command=["echo", "postprocessing"],
+        cwd=Path.cwd(),
+        core=True,
+        skip_in_single_platform=True,
+    )
+    stage_commands[3] = StageCommand(
+        name="summarizing",
+        dependency_name="summarizing",
+        command=["echo", "dual-summary"],
+        fallback_command=["echo", "autohome-summary"],
+        fallback_commands_by_stage={"collecting_dcd": ["echo", "dcd-summary"]},
+        cwd=Path.cwd(),
+        core=True,
+    )
+
+    def runner(command, job_paths, progress_sink):
+        seen_commands.append(command.command)
+        if command.name == "collecting_autohome":
+            raise StageExecutionError(stage=command.name, error_code="OPENCLAW_ARTIFACTS_MISSING", message="autohome missing")
+        return StageResult(status="success")
+
+    result = run_pipeline(
+        JobContext(job_id="job_dcd_single_platform", model_name="QQ3", artifact_root=tmp_path),
+        stage_commands,
+        runner,
+    )
+
+    assert result.status == "completed_degraded"
+    assert result.degraded is True
+    assert result.completed_stages == ["collecting_dcd", "summarizing"]
+    assert ["echo", "postprocessing"] not in seen_commands
+    assert ["echo", "dcd-summary"] in seen_commands
+
+
 def test_pipeline_fails_when_core_stage_breaks_without_recovery(tmp_path: Path) -> None:
     stage_commands = [
         make_stage("collecting_autohome"),
