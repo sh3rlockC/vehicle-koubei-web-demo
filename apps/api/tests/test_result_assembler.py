@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import zipfile
+import json
 from io import BytesIO
 from pathlib import Path
 
@@ -39,7 +40,7 @@ def make_client(tmp_path: Path, *, raise_server_exceptions: bool = True) -> Test
     return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 
 
-def seed_result_job(job_id: str, *, term_excel_path: Path | None = None) -> None:
+def seed_result_job(job_id: str, *, term_excel_path: Path | None = None, final_report_path: Path | None = None) -> None:
     fixture_root = Path("/Users/xyc/Documents/codexwork/data/26.4.7/风云X3 PLUS")
     term_excel_path = term_excel_path or fixture_root / "风云X3 PLUS_词云词项清单.xlsx"
     session = get_session_local()()
@@ -55,34 +56,42 @@ def seed_result_job(job_id: str, *, term_excel_path: Path | None = None) -> None
         )
         session.add(job)
         session.flush()
-        session.add_all(
-            [
+        artifacts = [
+            JobArtifact(
+                job_id=job_id,
+                artifact_type="excel",
+                artifact_path=str(fixture_root / "风云X3 PLUS_双平台口碑摘要.xlsx"),
+                source_stage="summarizing",
+            ),
+            JobArtifact(
+                job_id=job_id,
+                artifact_type="image_png",
+                artifact_path=str(fixture_root / "风云X3 PLUS_优点词云.png"),
+                source_stage="rendering_wordcloud",
+            ),
+            JobArtifact(
+                job_id=job_id,
+                artifact_type="image_png",
+                artifact_path=str(fixture_root / "风云X3 PLUS_槽点词云.png"),
+                source_stage="rendering_wordcloud",
+            ),
+            JobArtifact(
+                job_id=job_id,
+                artifact_type="excel",
+                artifact_path=str(term_excel_path),
+                source_stage="rendering_wordcloud",
+            ),
+        ]
+        if final_report_path is not None:
+            artifacts.append(
                 JobArtifact(
                     job_id=job_id,
-                    artifact_type="excel",
-                    artifact_path=str(fixture_root / "风云X3 PLUS_双平台口碑摘要.xlsx"),
-                    source_stage="summarizing",
-                ),
-                JobArtifact(
-                    job_id=job_id,
-                    artifact_type="image_png",
-                    artifact_path=str(fixture_root / "风云X3 PLUS_优点词云.png"),
-                    source_stage="rendering_wordcloud",
-                ),
-                JobArtifact(
-                    job_id=job_id,
-                    artifact_type="image_png",
-                    artifact_path=str(fixture_root / "风云X3 PLUS_槽点词云.png"),
-                    source_stage="rendering_wordcloud",
-                ),
-                JobArtifact(
-                    job_id=job_id,
-                    artifact_type="excel",
-                    artifact_path=str(term_excel_path),
-                    source_stage="rendering_wordcloud",
-                ),
-            ]
-        )
+                    artifact_type="json",
+                    artifact_path=str(final_report_path),
+                    source_stage="generating_hermes_outputs",
+                )
+            )
+        session.add_all(artifacts)
         session.commit()
     finally:
         session.close()
@@ -171,6 +180,38 @@ def test_result_endpoint_ignores_unreadable_wordcloud_terms(tmp_path: Path) -> N
     assert payload["wordcloud"]["keyword_rankings"] == {"positive": [], "negative": [], "combined": []}
 
 
+def test_result_endpoint_prefers_hermes_final_report_json(tmp_path: Path) -> None:
+    final_report = tmp_path / "final_report.json"
+    final_report.write_text(
+        json.dumps(
+            {
+                "headline": "Hermes 生成的结论",
+                "executive_summary": "来自原评论的大模型解读",
+                "strength_blocks": [{"title": "核心好评", "summary": "空间和配置最被认可", "evidence_ids": ["hermes.1"]}],
+                "weakness_blocks": [],
+                "platform_difference_blocks": [],
+                "action_blocks": [],
+                "boss_brief": ["先讲核心好评", "再讲核心槽点", "最后讲动作建议"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    client = make_client(tmp_path)
+    seed_result_job("job_hermes_report", final_report_path=final_report)
+
+    verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify.status_code == 200
+
+    response = client.get("/api/jobs/job_hermes_report/result")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ai_report"]["headline"] == "Hermes 生成的结论"
+    assert payload["ai_report"]["strength_blocks"][0]["title"] == "核心好评"
+    assert any(item["type"] == "final_report_json" for item in payload["artifacts"])
+
+
 def test_artifact_download_serves_file(tmp_path: Path) -> None:
     client = make_client(tmp_path)
     seed_result_job("job_download")
@@ -212,6 +253,24 @@ def test_result_zip_download_bundles_excel_and_wordcloud_files(tmp_path: Path) -
     assert "keyword_rank_negative.png" in names
     assert "keyword_rank_combined.png" in names
     assert all(content.startswith(b"\x89PNG\r\n\x1a\n") for content in rank_pngs.values())
+
+
+def test_result_zip_download_includes_hermes_final_report_json(tmp_path: Path) -> None:
+    final_report = tmp_path / "final_report.json"
+    final_report.write_text('{"headline":"Hermes"}', encoding="utf-8")
+    client = make_client(tmp_path)
+    seed_result_job("job_zip_hermes", final_report_path=final_report)
+
+    verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify.status_code == 200
+
+    response = client.get("/api/jobs/job_zip_hermes/artifacts.zip")
+
+    assert response.status_code == 200
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        names = set(archive.namelist())
+
+    assert "final_report.json" in names
 
 
 def test_result_zip_download_skips_keyword_pngs_when_terms_excel_is_unreadable(tmp_path: Path) -> None:

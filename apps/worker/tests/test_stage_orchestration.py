@@ -101,6 +101,30 @@ def test_pipeline_degrades_when_non_core_stage_fails(tmp_path: Path) -> None:
     assert "summarizing" in result.completed_stages
 
 
+def test_pipeline_degrades_when_stage_result_reports_degraded(tmp_path: Path) -> None:
+    stage_commands = [
+        make_stage("collecting_autohome"),
+        make_stage("collecting_dcd"),
+        make_stage("postprocessing"),
+        make_stage("generating_hermes_outputs"),
+    ]
+
+    def runner(command, job_paths, progress_sink):
+        if command.name == "generating_hermes_outputs":
+            return StageResult(status="degraded", artifact_paths=["/tmp/final_report.json"])
+        return StageResult(status="success")
+
+    result = run_pipeline(
+        JobContext(job_id="job_hermes_degraded", model_name="风云X3 PLUS", artifact_root=tmp_path),
+        stage_commands,
+        runner,
+    )
+
+    assert result.status == "completed_degraded"
+    assert result.degraded is True
+    assert result.completed_stages == [stage.name for stage in stage_commands]
+
+
 def test_pipeline_falls_back_to_single_platform_once(tmp_path: Path) -> None:
     stage_commands = [
         make_stage("collecting_autohome"),

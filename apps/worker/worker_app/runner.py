@@ -102,7 +102,7 @@ def run_stage_command(command: StageCommand, job_paths: JobPaths, progress_sink:
         output_metadata["progress_file"] = command.progress_file
 
     return StageResult(
-        status="success",
+        status="degraded" if output_metadata.get("stdout_json", {}).get("degraded") is True else "success",
         artifact_paths=artifact_paths,
         output_metadata=output_metadata,
     )

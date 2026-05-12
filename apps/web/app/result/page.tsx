@@ -5,7 +5,16 @@ import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
 import { SignalPanel, StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError, toJsonBody } from "@/lib/api";
-import type { JobResultResponse, KeywordRankItem, QaResponse } from "@/lib/api-types";
+import type {
+  CreateTimeReportRequest,
+  JobCommentPageResponse,
+  JobCommentSummaryResponse,
+  JobResultResponse,
+  KeywordRankItem,
+  QaResponse,
+  TimeReportListResponse,
+  TimeReportResponse,
+} from "@/lib/api-types";
 import { clearFlowState, getFlowState, setFlowState } from "@/lib/flow-state";
 
 const statusLabels: Record<string, string> = {
@@ -27,6 +36,13 @@ const answerSourceLabels: Record<string, string> = {
   fallback: "规则兜底",
 };
 
+const timeReportStatusLabels: Record<string, string> = {
+  queued: "排队中",
+  running: "生成中",
+  completed: "已完成",
+  failed: "失败",
+};
+
 function labelFor(value: string, labels: Record<string, string>) {
   return labels[value] ?? value;
 }
@@ -39,6 +55,27 @@ function asText(value: unknown, fallback = "") {
     return String(value);
   }
   return fallback;
+}
+
+function statusTone(status: string): "default" | "success" | "warning" | "danger" | "accent" {
+  if (status === "completed") {
+    return "success";
+  }
+  if (status === "failed") {
+    return "danger";
+  }
+  if (status === "queued" || status === "running") {
+    return "warning";
+  }
+  return "default";
+}
+
+function formatPlatformCounts(counts: Record<string, number>) {
+  const entries = Object.entries(counts);
+  if (!entries.length) {
+    return "暂无平台样本";
+  }
+  return entries.map(([platform, count]) => `${platform} ${count}`).join(" / ");
 }
 
 function reportText(report: Record<string, unknown> | null, keys: string[], fallback = "") {
@@ -129,6 +166,16 @@ export default function ResultPage() {
   const [qaResult, setQaResult] = useState<QaResponse | null>(null);
   const [qaLoading, setQaLoading] = useState(false);
   const [qaError, setQaError] = useState("");
+  const [commentSummary, setCommentSummary] = useState<JobCommentSummaryResponse | null>(null);
+  const [commentPreview, setCommentPreview] = useState<JobCommentPageResponse | null>(null);
+  const [timeReports, setTimeReports] = useState<TimeReportResponse[]>([]);
+  const [timeStart, setTimeStart] = useState("");
+  const [timeEnd, setTimeEnd] = useState("");
+  const [timeContextLoading, setTimeContextLoading] = useState(false);
+  const [timePreviewLoading, setTimePreviewLoading] = useState(false);
+  const [creatingTimeReport, setCreatingTimeReport] = useState(false);
+  const [timeError, setTimeError] = useState("");
+  const activeTimeReportCount = timeReports.filter((report) => report.status === "queued" || report.status === "running").length;
 
   useEffect(() => {
     setReady(true);
@@ -184,6 +231,136 @@ export default function ResultPage() {
       cancelled = true;
     };
   }, [flowState.accessVersion, flowState.jobId, ready]);
+
+  useEffect(() => {
+    if (!ready || !flowState.accessVersion || !flowState.jobId || !result || result.status === "expired") {
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadTimeContext = async () => {
+      setTimeContextLoading(true);
+      setTimeError("");
+
+      try {
+        const [summaryPayload, reportsPayload] = await Promise.all([
+          apiRequest<JobCommentSummaryResponse>(`/api/jobs/${flowState.jobId}/comments/summary`),
+          apiRequest<TimeReportListResponse>(`/api/jobs/${flowState.jobId}/time-reports`),
+        ]);
+        if (cancelled) {
+          return;
+        }
+
+        setCommentSummary(summaryPayload);
+        setTimeReports(reportsPayload.items);
+        setTimeStart((current) => current || summaryPayload.date_min || "");
+        setTimeEnd((current) => current || summaryPayload.date_max || "");
+      } catch (err) {
+        if (cancelled) {
+          return;
+        }
+        setTimeError(err instanceof ApiError ? err.message : "无法读取时间范围评论。");
+      } finally {
+        if (!cancelled) {
+          setTimeContextLoading(false);
+        }
+      }
+    };
+
+    void loadTimeContext();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, flowState.accessVersion, flowState.jobId, result]);
+
+  useEffect(() => {
+    if (!ready || !flowState.accessVersion || !flowState.jobId || !result || result.status === "expired") {
+      return;
+    }
+
+    if (!timeStart || !timeEnd) {
+      setCommentPreview(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadPreview = async () => {
+      setTimePreviewLoading(true);
+      try {
+        const payload = await apiRequest<JobCommentPageResponse>(
+          `/api/jobs/${flowState.jobId}/comments?start_date=${encodeURIComponent(timeStart)}&end_date=${encodeURIComponent(timeEnd)}&page=1&page_size=20`
+        );
+        if (!cancelled) {
+          setCommentPreview(payload);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setCommentPreview(null);
+          setTimeError(err instanceof ApiError ? err.message : "无法读取脱敏评论预览。");
+        }
+      } finally {
+        if (!cancelled) {
+          setTimePreviewLoading(false);
+        }
+      }
+    };
+
+    void loadPreview();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, flowState.accessVersion, flowState.jobId, result, timeStart, timeEnd]);
+
+  useEffect(() => {
+    if (!ready || !flowState.accessVersion || !flowState.jobId || activeTimeReportCount === 0) {
+      return;
+    }
+
+    const jobId = flowState.jobId;
+    const timer = window.setInterval(() => {
+      void loadTimeReports(jobId);
+    }, 3000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [ready, flowState.accessVersion, flowState.jobId, activeTimeReportCount]);
+
+  async function loadTimeReports(jobId: string) {
+    const payload = await apiRequest<TimeReportListResponse>(`/api/jobs/${jobId}/time-reports`);
+    setTimeReports(payload.items);
+  }
+
+  async function createTimeReport() {
+    if (!flowState.jobId || !timeStart || !timeEnd) {
+      return;
+    }
+
+    setCreatingTimeReport(true);
+    setTimeError("");
+
+    const payload: CreateTimeReportRequest = {
+      start_date: timeStart,
+      end_date: timeEnd,
+    };
+
+    try {
+      const report = await apiRequest<TimeReportResponse>(`/api/jobs/${flowState.jobId}/time-reports`, {
+        method: "POST",
+        body: toJsonBody(payload),
+      });
+      setTimeReports((current) => [report, ...current.filter((item) => item.report_id !== report.report_id)]);
+      await loadTimeReports(flowState.jobId);
+    } catch (err) {
+      setTimeError(err instanceof ApiError ? err.message : "无法创建时间范围一页纸任务。");
+    } finally {
+      setCreatingTimeReport(false);
+    }
+  }
 
   async function askQuestion(question: string) {
     const trimmed = question.trim();
@@ -279,6 +456,8 @@ export default function ResultPage() {
   );
   const actionItems = reportList(result.ai_report, ["action_items", "recommendations", "next_steps"], []);
   const keywordRankings = result.wordcloud.keyword_rankings ?? { positive: [], negative: [], combined: [] };
+  const maxDailyCommentCount = Math.max(...(commentSummary?.daily_counts.map((item) => item.count) ?? []), 0);
+  const previewTotal = commentPreview?.total ?? 0;
 
   return (
     <main className="result-page">
@@ -437,6 +616,188 @@ export default function ResultPage() {
           <KeywordRankList title="优点关键词" tone="positive" items={keywordRankings.positive} />
           <KeywordRankList title="槽点关键词" tone="negative" items={keywordRankings.negative} />
           <KeywordRankList title="全部关键词" tone="combined" items={keywordRankings.combined} />
+        </div>
+      </section>
+
+      <section className="time-report-section">
+        <div className="time-report-head">
+          <div>
+            <p className="eyebrow">TIME RANGE</p>
+            <h3>按时间生成一页纸</h3>
+            <p>先按日期预览脱敏评论，再生成当前车型的时间版一页纸；历史版本不会覆盖全量报告。</p>
+          </div>
+          <div className="meta-row">
+            <StatusPill tone="accent">{result.model_name}</StatusPill>
+            <StatusPill tone={activeTimeReportCount ? "warning" : "default"}>
+              {activeTimeReportCount ? `生成中 ${activeTimeReportCount}` : "无运行任务"}
+            </StatusPill>
+          </div>
+        </div>
+
+        <div className="time-report-controls">
+          <div className="field">
+            <label htmlFor="time-start">开始日期</label>
+            <input
+              id="time-start"
+              type="date"
+              min={commentSummary?.date_min ?? undefined}
+              max={commentSummary?.date_max ?? undefined}
+              value={timeStart}
+              onChange={(event) => {
+                setTimeStart(event.target.value);
+                setTimeError("");
+              }}
+              disabled={timeContextLoading || !commentSummary?.date_min}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="time-end">结束日期</label>
+            <input
+              id="time-end"
+              type="date"
+              min={commentSummary?.date_min ?? undefined}
+              max={commentSummary?.date_max ?? undefined}
+              value={timeEnd}
+              onChange={(event) => {
+                setTimeEnd(event.target.value);
+                setTimeError("");
+              }}
+              disabled={timeContextLoading || !commentSummary?.date_max}
+            />
+          </div>
+          <div className="time-report-submit">
+            <button
+              className="button"
+              type="button"
+              onClick={() => void createTimeReport()}
+              disabled={creatingTimeReport || timePreviewLoading || !timeStart || !timeEnd || previewTotal === 0}
+            >
+              {creatingTimeReport ? "正在创建" : "生成一页纸"}
+            </button>
+          </div>
+        </div>
+
+        {timeError ? <p className="error">{timeError}</p> : null}
+
+        <div className="time-report-body">
+          <div className="time-report-preview">
+            <div className="time-preview-head">
+              <div>
+                <h4>评论预览</h4>
+                <p>{timePreviewLoading ? "正在加载..." : `当前范围 ${previewTotal} 条可分析评论`}</p>
+              </div>
+              {commentSummary ? (
+                <div className="meta-row">
+                  <StatusPill>总量 {commentSummary.total_count}</StatusPill>
+                  <StatusPill>有日期 {commentSummary.dated_count}</StatusPill>
+                  <StatusPill tone={commentSummary.undated_count ? "warning" : "success"}>
+                    无日期 {commentSummary.undated_count}
+                  </StatusPill>
+                </div>
+              ) : null}
+            </div>
+
+            {commentSummary?.daily_counts.length ? (
+              <div className="time-distribution" aria-label="按天评论数量">
+                {commentSummary.daily_counts.slice(0, 28).map((item) => {
+                  const height = maxDailyCommentCount > 0 ? Math.max(12, Math.round((item.count / maxDailyCommentCount) * 58)) : 12;
+                  return (
+                    <span
+                      key={item.date}
+                      title={`${item.date}：${item.count} 条`}
+                      style={{ height: `${height}px` }}
+                    />
+                  );
+                })}
+              </div>
+            ) : null}
+
+            <div className="comment-preview-list">
+              {commentPreview?.items.length ? (
+                commentPreview.items.map((comment) => (
+                  <article className="comment-preview-card" key={comment.comment_id}>
+                    <div className="comment-preview-meta">
+                      <strong>{comment.platform}</strong>
+                      <span>{comment.date}</span>
+                      <span>{comment.model_name}</span>
+                    </div>
+                    {comment.positive_text ? (
+                      <p>
+                        <strong>最满意：</strong>
+                        {comment.positive_text}
+                      </p>
+                    ) : null}
+                    {comment.negative_text ? (
+                      <p>
+                        <strong>最不满意：</strong>
+                        {comment.negative_text}
+                      </p>
+                    ) : null}
+                    {comment.full_text ? (
+                      <p>
+                        <strong>评价全文：</strong>
+                        {comment.full_text}
+                      </p>
+                    ) : null}
+                  </article>
+                ))
+              ) : (
+                <p className="status-copy">
+                  {timePreviewLoading ? "正在加载脱敏评论..." : "该时间范围无可分析评论。"}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="time-report-history">
+            <div className="time-preview-head">
+              <div>
+                <h4>时间版历史</h4>
+                <p>{timeReports.length ? `已生成或排队 ${timeReports.length} 个版本` : "暂无时间版报告"}</p>
+              </div>
+            </div>
+
+            <div className="time-report-list">
+              {timeReports.length ? (
+                timeReports.map((report) => {
+                  const headline = reportText(report.report_json, ["headline", "title"], "");
+                  const summary = reportText(report.report_json, ["executive_summary", "summary"], "");
+                  return (
+                    <article className="time-report-card" key={report.report_id}>
+                      <div className="time-report-card-head">
+                        <div>
+                          <strong>
+                            {report.date_range.start_date} 至 {report.date_range.end_date}
+                          </strong>
+                          <span>{formatPlatformCounts(report.platform_counts)}</span>
+                        </div>
+                        <StatusPill tone={statusTone(report.status)}>
+                          {labelFor(report.status, timeReportStatusLabels)}
+                        </StatusPill>
+                      </div>
+                      <div className="time-report-card-meta">
+                        <span>{report.sample_count} 条样本</span>
+                        {report.source ? <span>{report.source}</span> : null}
+                        <span>{new Date(report.created_at).toLocaleString("zh-CN")}</span>
+                      </div>
+                      {headline ? <h4>{headline}</h4> : null}
+                      {summary ? <p>{summary}</p> : null}
+                      {report.error_message ? <p className="error">{report.error_message}</p> : null}
+                      <div className="actions">
+                        {report.status === "completed" ? (
+                          <a className="button secondary" href={report.zip_url}>
+                            下载 ZIP
+                          </a>
+                        ) : null}
+                      </div>
+                    </article>
+                  );
+                })
+              ) : (
+                <p className="status-copy">选择日期范围并生成后，这里会保留该车型的时间版一页纸。</p>
+              )}
+            </div>
+          </div>
         </div>
       </section>
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from app.services.result_reader import read_summary_workbook
 
 
 SUMMARY_SUFFIX = "_双平台口碑摘要.xlsx"
+HERMES_QA_CHUNKS = "qa_chunks.json"
 
 INTENT_KEYWORDS = {
     "boss": ("老板", "汇报", "三句", "3句", "一句话"),
@@ -24,11 +26,11 @@ INTENT_KEYWORDS = {
 }
 
 INTENT_SOURCE_WEIGHTS = {
-    "boss": {"one_pager": 5, "business": 3, "overview": 2},
-    "strength": {"business": 4, "overview": 3, "compare": 2, "one_pager": 2},
-    "weakness": {"business": 4, "opportunity": 4, "overview": 3, "compare": 2, "one_pager": 2},
-    "comparison": {"compare": 5, "overview": 2, "one_pager": 1},
-    "action": {"opportunity": 5, "business": 4, "one_pager": 2},
+    "boss": {"one_pager": 5, "business": 3, "overview": 2, "hermes_evidence": 3},
+    "strength": {"business": 4, "overview": 3, "compare": 2, "one_pager": 2, "hermes_evidence": 4},
+    "weakness": {"business": 4, "opportunity": 4, "overview": 3, "compare": 2, "one_pager": 2, "hermes_evidence": 4},
+    "comparison": {"compare": 5, "overview": 2, "one_pager": 1, "hermes_evidence": 4},
+    "action": {"opportunity": 5, "business": 4, "one_pager": 2, "hermes_evidence": 4},
 }
 
 FOLLOW_UP_SUGGESTIONS = {
@@ -166,6 +168,35 @@ def _build_chunks(summary_path: str | Path, *, model_name: str) -> list[dict]:
     return chunks
 
 
+def _build_hermes_chunks(path: str | Path, *, model_name: str) -> list[dict]:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    values = payload.get("chunks") if isinstance(payload, dict) else payload
+    chunks: list[dict] = []
+    for index, item in enumerate(values if isinstance(values, list) else [], start=1):
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        tags = item.get("tags") if isinstance(item.get("tags"), list) else []
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else item.get("metadata_json")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        _append_chunk(
+            chunks,
+            chunk_id=str(item.get("chunk_id") or f"hermes_{index}"),
+            source_type=str(item.get("source_type") or "hermes_evidence"),
+            text=text,
+            tags=[*tags, model_name, "hermes"],
+            metadata={**metadata, "source": metadata.get("source", "hermes")},
+        )
+    return chunks
+
+
 def find_summary_artifact(db: Session, job_id: str) -> JobArtifact | None:
     artifacts = (
         db.query(JobArtifact)
@@ -176,7 +207,24 @@ def find_summary_artifact(db: Session, job_id: str) -> JobArtifact | None:
     return next((artifact for artifact in artifacts if artifact.artifact_path.endswith(SUMMARY_SUFFIX)), None)
 
 
-def ensure_qa_chunks(db: Session, *, job_id: str, summary_path: str | Path, model_name: str) -> list[JobQAChunk]:
+def find_qa_chunks_artifact(db: Session, job_id: str) -> JobArtifact | None:
+    artifacts = (
+        db.query(JobArtifact)
+        .filter(JobArtifact.job_id == job_id)
+        .order_by(JobArtifact.id.asc())
+        .all()
+    )
+    return next((artifact for artifact in artifacts if artifact.artifact_path.endswith(HERMES_QA_CHUNKS)), None)
+
+
+def ensure_qa_chunks(
+    db: Session,
+    *,
+    job_id: str,
+    summary_path: str | Path,
+    model_name: str,
+    hermes_chunks_path: str | Path | None = None,
+) -> list[JobQAChunk]:
     existing = (
         db.query(JobQAChunk)
         .filter(JobQAChunk.job_id == job_id)
@@ -186,7 +234,9 @@ def ensure_qa_chunks(db: Session, *, job_id: str, summary_path: str | Path, mode
     if existing:
         return existing
 
-    payloads = _build_chunks(summary_path, model_name=model_name)
+    payloads = _build_hermes_chunks(hermes_chunks_path, model_name=model_name) if hermes_chunks_path else []
+    if not payloads:
+        payloads = _build_chunks(summary_path, model_name=model_name)
     for payload in payloads:
         db.add(JobQAChunk(job_id=job_id, **payload))
     db.commit()
@@ -347,11 +397,13 @@ def answer_job_question(
     if summary_artifact is None:
         raise ValueError("summary artifact missing")
 
+    qa_chunks_artifact = find_qa_chunks_artifact(db, job_id)
     chunks = ensure_qa_chunks(
         db,
         job_id=job_id,
         summary_path=summary_artifact.artifact_path,
         model_name=model_name or Path(summary_artifact.artifact_path).name.replace(SUMMARY_SUFFIX, ""),
+        hermes_chunks_path=qa_chunks_artifact.artifact_path if qa_chunks_artifact else None,
     )
 
     intents = _detect_intents(question)

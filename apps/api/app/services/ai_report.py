@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -18,8 +21,8 @@ def build_deterministic_report(context: dict) -> dict:
 
     strengths = [
         {
-            "title": "核心卖点",
-            "summary": business.get("核心卖点", ""),
+            "title": "核心好评",
+            "summary": business.get("核心好评", business.get("核心卖点", "")),
             "evidence_ids": ["business.core_strengths"],
         }
     ]
@@ -97,6 +100,7 @@ def ensure_ai_report(
     job_id: str,
     summary_path: str,
     model_name: str,
+    report_path: str | None = None,
 ) -> JobAIReport:
     existing = (
         db.query(JobAIReport)
@@ -106,6 +110,19 @@ def ensure_ai_report(
     )
     if existing is not None:
         return existing
+
+    if report_path and Path(report_path).exists():
+        try:
+            payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = None
+        ok, _errors = validate_report_payload(payload) if isinstance(payload, dict) else (False, ["invalid hermes report"])
+        if ok and isinstance(payload, dict):
+            report = JobAIReport(job_id=job_id, report_version="hermes-v1", report_json=payload)
+            db.add(report)
+            db.commit()
+            db.refresh(report)
+            return report
 
     _context, payload, version = generate_report_payload(summary_path=summary_path, model_name=model_name)
     report = JobAIReport(job_id=job_id, report_version=version, report_json=payload)
