@@ -91,6 +91,7 @@ def build_stage_commands(
     wordcloud_terms_output = job_paths.outputs.wordcloud / f"{model_name}_词云词项清单.xlsx"
     final_report_output = job_paths.outputs.ai / "final_report.json"
     qa_chunks_output = job_paths.outputs.ai / "qa_chunks.json"
+    normalized_comments_output = job_paths.outputs.ai / "normalized_comments.jsonl"
     autohome_progress = job_paths.progress / "collecting_autohome.progress.json"
     dcd_progress = job_paths.progress / "collecting_dcd.progress.json"
     hermes_progress = job_paths.progress / "generating_hermes_outputs.progress.json"
@@ -284,6 +285,7 @@ def build_stage_commands(
             optional_artifacts=(
                 str(job_paths.outputs.wordcloud / f"{model_name}_优点词云.png"),
                 str(job_paths.outputs.wordcloud / f"{model_name}_槽点词云.png"),
+                str(normalized_comments_output),
             ),
             progress_file=str(hermes_progress),
             parse_json_stdout=True,

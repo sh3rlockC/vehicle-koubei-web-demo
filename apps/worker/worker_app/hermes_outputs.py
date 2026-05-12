@@ -29,6 +29,33 @@ LEGACY_LABEL_REPLACEMENTS = {
     "核心槽点TOP": "最不满意TOP",
     "核心卖点": "核心好评",
 }
+COMMENT_SECTION_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("positive", ("最满意", "满意", "优点", "优势", "正向反馈")),
+    ("negative", ("最不满意", "不满意", "缺点", "槽点", "负向反馈")),
+    ("space", ("空间", "乘坐空间", "储物空间")),
+    ("driving", ("驾驶感受", "驾驶体验", "操控", "动力", "底盘")),
+    ("range", ("续航", "能耗", "油耗", "电耗", "补能")),
+    ("appearance", ("外观", "造型")),
+    ("interior", ("内饰", "座舱")),
+    ("comfort", ("舒适性", "舒适")),
+    ("configuration", ("配置", "功能")),
+    ("intelligence", ("智能化", "车机", "智驾", "智能驾驶", "辅助驾驶")),
+    ("cost_value", ("性价比", "价格", "购车价")),
+    ("safety", ("安全", "安全性")),
+    ("service", ("服务", "售后", "交付")),
+)
+COMMENT_SECTION_LABEL_TO_KEY = {
+    label: key
+    for key, labels in COMMENT_SECTION_ALIASES
+    for label in labels
+}
+COMMENT_SECTION_LABEL_PATTERN = "|".join(
+    re.escape(label)
+    for label in sorted(COMMENT_SECTION_LABEL_TO_KEY, key=len, reverse=True)
+)
+COMMENT_SECTION_RE = re.compile(
+    rf"(?:【(?P<bracket>{COMMENT_SECTION_LABEL_PATTERN})】|\[(?P<square>{COMMENT_SECTION_LABEL_PATTERN})\]|(?P<plain>{COMMENT_SECTION_LABEL_PATTERN})\s*[：:])"
+)
 
 
 @dataclass(frozen=True)
@@ -95,7 +122,51 @@ def _iter_sheet_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _comment_from_row(row: dict[str, Any], *, platform: str, model_name: str) -> dict[str, str] | None:
+def _append_section(sections: dict[str, str], key: str, value: str) -> None:
+    text = _clean_text(value, limit=1600)
+    if not text:
+        return
+    if sections.get(key):
+        sections[key] = _clean_text(f"{sections[key]}；{text}", limit=1600)
+    else:
+        sections[key] = text
+
+
+def _extract_comment_sections(full_text: str) -> dict[str, str]:
+    text = _clean_text(full_text, limit=6000)
+    if not text:
+        return {}
+    matches = list(COMMENT_SECTION_RE.finditer(text))
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        label = match.group("bracket") or match.group("square") or match.group("plain")
+        key = COMMENT_SECTION_LABEL_TO_KEY.get(label or "")
+        if not key:
+            continue
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        _append_section(sections, key, text[start:end])
+    return sections
+
+
+def _standard_raw_comment(*, positive_text: str, negative_text: str, full_text: str) -> dict[str, Any]:
+    sections = _extract_comment_sections(full_text)
+    effective_positive = positive_text or sections.get("positive", "")
+    effective_negative = negative_text or sections.get("negative", "")
+    topic_sections = {
+        key: value
+        for key, value in sections.items()
+        if key not in {"positive", "negative"} and value
+    }
+    return {
+        "positive_text": effective_positive,
+        "negative_text": effective_negative,
+        "full_text": full_text,
+        "sections": topic_sections,
+    }
+
+
+def _comment_from_row(row: dict[str, Any], *, platform: str, model_name: str) -> dict[str, Any] | None:
     positive_text = _first_value(row, ("最满意", "满意", "优点", "优势", "正向反馈"))
     negative_text = _first_value(row, ("最不满意", "不满意", "缺点", "槽点", "负向反馈"))
     full_text = _first_value(row, ("评价详情", "评价全文", "口碑内容", "内容", "正文", "评论", "原文"))
@@ -104,13 +175,15 @@ def _comment_from_row(row: dict[str, Any], *, platform: str, model_name: str) ->
 
     if not any([positive_text, negative_text, full_text]):
         return None
+    raw_comment = _standard_raw_comment(positive_text=positive_text, negative_text=negative_text, full_text=full_text)
     return {
         "platform": platform,
         "date": date,
         "model_name": row_model,
-        "positive_text": positive_text,
-        "negative_text": negative_text,
+        "positive_text": raw_comment["positive_text"],
+        "negative_text": raw_comment["negative_text"],
         "full_text": full_text,
+        "raw_comment": raw_comment,
     }
 
 
@@ -119,8 +192,8 @@ def extract_whitelisted_comments(
     autohome_input: str | Path,
     dcd_input: str | Path | None,
     model_name: str,
-) -> list[dict[str, str]]:
-    comments: list[dict[str, str]] = []
+) -> list[dict[str, Any]]:
+    comments: list[dict[str, Any]] = []
     autohome_path = Path(autohome_input)
     if autohome_path.exists():
         autohome_index = 1
@@ -342,7 +415,25 @@ def _build_json_repair_prompt(*, raw_response: str, parse_error: Exception) -> s
     )
 
 
-def _build_batch_prompt(*, model_name: str, batch_index: int, total_batches: int, comments: list[dict[str, str]]) -> str:
+def _comment_for_llm(comment: dict[str, Any]) -> dict[str, Any]:
+    raw_comment = comment.get("raw_comment")
+    if not isinstance(raw_comment, dict):
+        raw_comment = _standard_raw_comment(
+            positive_text=_clean_text(comment.get("positive_text"), limit=900),
+            negative_text=_clean_text(comment.get("negative_text"), limit=900),
+            full_text=_clean_text(comment.get("full_text"), limit=900),
+        )
+    return {
+        "comment_id": _clean_text(comment.get("comment_id"), limit=80),
+        "platform": _clean_text(comment.get("platform"), limit=80),
+        "date": _clean_text(comment.get("date"), limit=80),
+        "model_name": _clean_text(comment.get("model_name"), limit=160),
+        "raw_comment": raw_comment,
+    }
+
+
+def _build_batch_prompt(*, model_name: str, batch_index: int, total_batches: int, comments: list[dict[str, Any]]) -> str:
+    normalized_comments = [_comment_for_llm(comment) for comment in comments]
     return (
         "你是汽车口碑分析Agent。只根据输入的脱敏原评论JSON分析，不引入外部资料。\n"
         "只返回严格JSON，不要Markdown，不要解释。\n"
@@ -351,8 +442,8 @@ def _build_batch_prompt(*, model_name: str, batch_index: int, total_batches: int
         "\"platform_notes\":[{\"platform\":\"平台\",\"summary\":\"差异\"}],\"boss_brief\":[\"一句话\"]}。\n"
         "证据只允许填写输入中的 comment_id，不要在 JSON 中复制原评论原句。\n"
         f"车型：{model_name}；批次：{batch_index}/{total_batches}。\n"
-        "评论白名单字段如下：\n"
-        + json.dumps(comments, ensure_ascii=False, default=_json_default)
+        "评论白名单字段如下。raw_comment 是规则拆分后的标准原评论JSON，sections 只来自明确分项标题：\n"
+        + json.dumps(normalized_comments, ensure_ascii=False, default=_json_default)
     )
 
 
@@ -1057,6 +1148,15 @@ def _write_qa_chunks(path: Path, chunks: list[dict[str, Any]]) -> None:
     path.write_text(json.dumps(chunks, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _write_normalized_comments_jsonl(path: Path, comments: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps(_comment_for_llm(comment), ensure_ascii=False, default=_json_default)
+        for comment in comments
+    ]
+    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+
 def _write_validation(path: Path, *, source: str, degraded: bool) -> None:
     path.write_text(
         json.dumps({"ok": True, "source": source, "degraded": degraded}, ensure_ascii=False, indent=2),
@@ -1223,11 +1323,13 @@ def generate_outputs(
     wordcloud_dir = Path(wordcloud_output_dir)
     final_report_path = Path(final_report_output)
     qa_chunks_path = Path(qa_chunks_output)
+    normalized_comments_path = final_report_path.parent / "normalized_comments.jsonl"
     progress_path = Path(progress_file)
     debug_dir_value = (active_env.get("HERMES_DEBUG_DIR") or "").strip()
     hermes_debug_dir = Path(debug_dir_value) if debug_dir_value else progress_path.parent.parent / "logs" / "hermes"
     _reset_hermes_debug_dir(hermes_debug_dir)
     comments = extract_whitelisted_comments(autohome_input=autohome_path, dcd_input=dcd_path, model_name=model_name)
+    _write_normalized_comments_jsonl(normalized_comments_path, comments)
     _write_progress(progress_path, percent=10, message=f"读取脱敏原评论 {len(comments)} 条")
 
     fallback_reason = ""
@@ -1311,6 +1413,7 @@ def generate_outputs(
                 "terms_path": str(terms_path),
                 "final_report_path": str(final_report_path),
                 "qa_chunks_path": str(qa_chunks_path),
+                "normalized_comments_path": str(normalized_comments_path),
                 "image_paths": image_paths,
                 "postprocess_path": str(postprocess_input or ""),
             }
@@ -1344,6 +1447,7 @@ def generate_outputs(
         "degraded": True,
         "source": "rule-fallback",
         "fallback_reason": fallback_reason,
+        "normalized_comments_path": str(normalized_comments_path),
         **fallback,
     }
 
@@ -1382,7 +1486,9 @@ def generate_time_report_outputs(
     terms_path = output_path / f"{model_name}_{date_label}_词云词项清单.xlsx"
     final_report_path = output_path / "final_report.json"
     qa_chunks_path = output_path / "qa_chunks.json"
+    normalized_comments_path = output_path / "normalized_comments.jsonl"
     validation_path = summary_path.with_suffix(".validation.json")
+    _write_normalized_comments_jsonl(normalized_comments_path, selected_comments)
 
     api_key = (active_env.get("LLM_API_KEY") or active_env.get("DEEPSEEK_API_KEY") or "").strip()
     if not api_key:
@@ -1455,6 +1561,7 @@ def generate_time_report_outputs(
 
     artifact_paths = [
         str(final_report_path),
+        str(normalized_comments_path),
         str(summary_path),
         str(validation_path),
         str(terms_path),
@@ -1471,6 +1578,7 @@ def generate_time_report_outputs(
         "terms_path": str(terms_path),
         "final_report_path": str(final_report_path),
         "qa_chunks_path": str(qa_chunks_path),
+        "normalized_comments_path": str(normalized_comments_path),
         "validation_path": str(validation_path),
         "image_paths": image_paths,
         "artifact_paths": artifact_paths,

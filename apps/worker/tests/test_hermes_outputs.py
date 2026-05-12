@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from worker_app.hermes_outputs import (
     _build_aggregate_prompt,
+    _build_batch_prompt,
     _call_hermes,
     _runtime_provider,
     extract_whitelisted_comments,
@@ -85,6 +86,80 @@ def test_extract_whitelisted_comments_removes_private_fields(tmp_path: Path) -> 
     assert comments[0]["full_text"] == "空间大，内饰一般"
     assert comments[1]["platform"] == "懂车帝"
     assert comments[1]["full_text"] == "动力顺，车机偶发卡顿"
+
+
+def test_extract_whitelisted_comments_builds_standard_raw_comment_json(tmp_path: Path) -> None:
+    zj_path = tmp_path / "ZJ测试车原始口碑.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "购车口碑"
+    sheet.append(["用户名", "来源链接", "购车地", "发表日期", "评价详情"])
+    sheet.append(
+        [
+            "张三",
+            "https://example.invalid/a",
+            "上海浦东",
+            "2026-03-01",
+            "最满意：空间大，二排宽敞。 最不满意：车机偶发卡顿。 空间：第三排短途够用。 "
+            "驾驶感受：底盘稳。 续航：纯电通勤够用。 外观：大气。 内饰：用料不错。 "
+            "性价比：配置高。 智能化：语音识别准确。",
+        ]
+    )
+    workbook.save(zj_path)
+
+    comments = extract_whitelisted_comments(
+        autohome_input=zj_path,
+        dcd_input=None,
+        model_name="测试车",
+    )
+
+    assert len(comments) == 1
+    comment = comments[0]
+    assert comment["positive_text"] == "空间大，二排宽敞。"
+    assert comment["negative_text"] == "车机偶发卡顿。"
+    assert comment["raw_comment"]["positive_text"] == "空间大，二排宽敞。"
+    assert comment["raw_comment"]["negative_text"] == "车机偶发卡顿。"
+    assert comment["raw_comment"]["sections"] == {
+        "space": "第三排短途够用。",
+        "driving": "底盘稳。",
+        "range": "纯电通勤够用。",
+        "appearance": "大气。",
+        "interior": "用料不错。",
+        "cost_value": "配置高。",
+        "intelligence": "语音识别准确。",
+    }
+    serialized = json.dumps(comment, ensure_ascii=False)
+    assert "张三" not in serialized
+    assert "example.invalid" not in serialized
+    assert "上海浦东" not in serialized
+
+
+def test_batch_prompt_uses_standard_raw_comment_json_shape() -> None:
+    comments = [
+        {
+            "comment_id": "autohome_0001",
+            "platform": "汽车之家",
+            "date": "2026-03-01",
+            "model_name": "测试车",
+            "positive_text": "空间大",
+            "negative_text": "车机卡顿",
+            "full_text": "最满意：空间大。最不满意：车机卡顿。空间：二排宽敞。",
+            "raw_comment": {
+                "positive_text": "空间大",
+                "negative_text": "车机卡顿",
+                "full_text": "最满意：空间大。最不满意：车机卡顿。空间：二排宽敞。",
+                "sections": {"space": "二排宽敞。"},
+            },
+        }
+    ]
+
+    prompt = _build_batch_prompt(model_name="测试车", batch_index=1, total_batches=1, comments=comments)
+
+    assert '"raw_comment"' in prompt
+    assert '"sections": {"space": "二排宽敞。"}' in prompt
+    assert '"comment_id": "autohome_0001"' in prompt
+    assert '"source_url"' not in prompt
+    assert '"purchase_location"' not in prompt
 
 
 def test_runtime_provider_prefers_deepseek_provider_even_with_base_url() -> None:
@@ -383,6 +458,12 @@ else:
     assert result["status"] == "success"
     assert result["degraded"] is False
     assert json.loads(Path(result["final_report_path"]).read_text(encoding="utf-8"))["headline"] == "测试车空间好评突出，车机仍需优化。"
+    normalized_comments_path = Path(result["normalized_comments_path"])
+    assert normalized_comments_path.exists()
+    normalized_comment = json.loads(normalized_comments_path.read_text(encoding="utf-8").splitlines()[0])
+    assert normalized_comment["comment_id"] == "autohome_0001"
+    assert "raw_comment" in normalized_comment
+    assert "sections" in normalized_comment["raw_comment"]
     assert (tmp_path / "logs" / "hermes" / "batch_001.attempt_1.stdout.txt").exists()
     assert (tmp_path / "logs" / "hermes" / "batch_001.attempt_1.parse_error.txt").exists()
 
