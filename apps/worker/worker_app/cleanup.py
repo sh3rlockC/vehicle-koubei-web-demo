@@ -9,7 +9,7 @@ import shutil
 import threading
 from typing import Mapping
 
-from sqlalchemy import bindparam, create_engine, text
+from sqlalchemy import bindparam, create_engine, inspect, text
 
 from worker_app.job_store import _engine_kwargs
 
@@ -89,6 +89,10 @@ def cleanup_expired_job_data(
 
     try:
         with engine.begin() as conn:
+            existing_table_names = set(inspect(conn).get_table_names())
+            if "jobs" not in existing_table_names:
+                return CleanupResult(expired_job_ids=[])
+
             rows = conn.execute(
                 text(
                     """
@@ -110,6 +114,8 @@ def cleanup_expired_job_data(
             for job_id in expired_job_ids:
                 _remove_job_dir(artifact_root, job_id)
                 for table_name in ("job_artifacts", "job_ai_reports", "job_qa_chunks", "job_time_reports"):
+                    if table_name not in existing_table_names:
+                        continue
                     conn.execute(text(f"DELETE FROM {table_name} WHERE job_id = :job_id"), {"job_id": job_id})
                 conn.execute(
                     text(
