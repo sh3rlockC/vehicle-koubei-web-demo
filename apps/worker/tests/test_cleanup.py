@@ -253,6 +253,52 @@ def test_cleanup_removes_expired_job_data_but_keeps_metadata(tmp_path: Path) -> 
         connection.close()
 
 
+def test_cleanup_skips_time_reports_table_when_schema_is_not_migrated(tmp_path: Path) -> None:
+    db_path = tmp_path / "cleanup.db"
+    artifact_root = tmp_path / "jobs"
+    create_cleanup_schema(db_path)
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=UTC)
+
+    old_job_dir = artifact_root / "job_old"
+    old_job_dir.mkdir(parents=True)
+    (old_job_dir / "raw.xlsx").write_text("old comments", encoding="utf-8")
+
+    connection = sqlite3.connect(db_path)
+    try:
+        insert_job(
+            connection,
+            job_id="job_old",
+            status="completed",
+            created_at=now - timedelta(days=5),
+            finished_at=now - timedelta(days=4),
+        )
+        connection.execute("DROP TABLE job_time_reports")
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = cleanup_expired_job_data(
+        database_url=f"sqlite+pysqlite:///{db_path}",
+        artifact_root=artifact_root,
+        retention_days=3,
+        now=now,
+    )
+
+    assert result.expired_job_ids == ["job_old"]
+    assert not old_job_dir.exists()
+    connection = sqlite3.connect(db_path)
+    try:
+        assert connection.execute("SELECT status, current_stage FROM jobs WHERE job_id = ?", ("job_old",)).fetchone() == (
+            "expired",
+            "expired",
+        )
+        assert connection.execute("SELECT COUNT(*) FROM job_artifacts WHERE job_id = ?", ("job_old",)).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM job_ai_reports WHERE job_id = ?", ("job_old",)).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM job_qa_chunks WHERE job_id = ?", ("job_old",)).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
 def test_cleanup_settings_default_to_three_days_and_twelve_hours(monkeypatch) -> None:
     monkeypatch.delenv("JOB_ARTIFACT_RETENTION_DAYS", raising=False)
     monkeypatch.delenv("JOB_ARTIFACT_CLEANUP_INTERVAL_SECONDS", raising=False)
