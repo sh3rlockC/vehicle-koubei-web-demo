@@ -190,6 +190,7 @@ Path(args.output).parent.mkdir(parents=True, exist_ok=True)
 workbook.save(args.output)
 Path(args.output).with_suffix(".validation.json").write_text("{}", encoding="utf-8")
 Path(args.progress_file).write_text(json.dumps({"percent": 100}), encoding="utf-8")
+Path(args.output).with_suffix(".args.json").write_text(json.dumps(vars(args), ensure_ascii=False), encoding="utf-8")
 """,
         encoding="utf-8",
     )
@@ -268,6 +269,43 @@ def test_generate_outputs_falls_back_when_hermes_json_is_invalid(tmp_path: Path)
     assert Path(result["final_report_path"]).exists()
     assert Path(result["qa_chunks_path"]).exists()
     assert load_workbook(result["summary_path"], data_only=True)["综合业务摘要"]["A2"].value == "核心好评"
+
+
+def test_generate_outputs_rule_fallback_uses_dcd_input_when_autohome_is_missing(tmp_path: Path) -> None:
+    zj_path, dcd_path = _write_input_workbooks(tmp_path)
+    zj_path.unlink()
+    summary_script = tmp_path / "summary.py"
+    wordcloud_script = tmp_path / "wordcloud.py"
+    fake_hermes = tmp_path / "hermes"
+    _write_fake_summary_script(summary_script)
+    _write_fake_wordcloud_script(wordcloud_script)
+    fake_hermes.write_text("#!/bin/sh\necho not-json\n", encoding="utf-8")
+    fake_hermes.chmod(0o755)
+    summary_output = tmp_path / "summary" / "测试车_双平台口碑摘要.xlsx"
+
+    result = generate_outputs(
+        autohome_input=zj_path,
+        dcd_input=dcd_path,
+        postprocess_input=None,
+        summary_output=summary_output,
+        terms_output=tmp_path / "wordcloud" / "测试车_词云词项清单.xlsx",
+        wordcloud_output_dir=tmp_path / "wordcloud",
+        final_report_output=tmp_path / "ai" / "final_report.json",
+        qa_chunks_output=tmp_path / "ai" / "qa_chunks.json",
+        model_name="测试车",
+        progress_file=tmp_path / "progress" / "generating_hermes_outputs.progress.json",
+        summary_script=summary_script,
+        wordcloud_script=wordcloud_script,
+        hermes_command=str(fake_hermes),
+        single_platform=True,
+        env={**os.environ, "LLM_API_KEY": "test-key", "LLM_MODEL_REPORT": "deepseek-chat"},
+    )
+
+    summary_args = json.loads(summary_output.with_suffix(".args.json").read_text(encoding="utf-8"))
+    assert result["status"] == "degraded"
+    assert summary_args["input"] == str(dcd_path)
+    assert summary_args["autohome_input"] is None
+    assert summary_args["dcd_input"] is None
 
 
 def test_generate_outputs_repairs_invalid_hermes_json_before_fallback(tmp_path: Path) -> None:

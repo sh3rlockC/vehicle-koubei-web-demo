@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,7 @@ class StageCommand:
     cwd: Path
     core: bool = True
     fallback_command: list[str] | None = None
+    fallback_commands_by_stage: dict[str, list[str]] = field(default_factory=dict)
     skip_in_single_platform: bool = False
     expected_artifacts: tuple[str, ...] = ()
     optional_artifacts: tuple[str, ...] = ()
@@ -51,11 +52,13 @@ def load_dependencies(manifest_path: Path = DEPENDENCY_MANIFEST) -> dict[str, di
     return load_dependency_map(manifest_path)
 
 
-def resolve_stage_command(stage: StageCommand, *, single_platform_mode: bool) -> StageCommand | None:
-    if not single_platform_mode:
+def resolve_stage_command(stage: StageCommand, *, single_platform_stage: str | None = None) -> StageCommand | None:
+    if not single_platform_stage:
         return stage
     if stage.skip_in_single_platform:
         return None
+    if single_platform_stage in stage.fallback_commands_by_stage:
+        return replace(stage, command=stage.fallback_commands_by_stage[single_platform_stage])
     if stage.fallback_command:
         return replace(stage, command=stage.fallback_command)
     return stage
@@ -127,11 +130,39 @@ def build_stage_commands(
         wordcloud_dep["entrypoint"],
         *build_wordcloud_font_args(),
     ]
-    hermes_single_platform_command = [
+    hermes_autohome_single_platform_command = [
         sys.executable,
         str(HERMES_OUTPUTS),
         "--autohome-input",
         str(zj_output),
+        "--summary-output",
+        str(summary_output),
+        "--terms-output",
+        str(wordcloud_terms_output),
+        "--wordcloud-output-dir",
+        str(job_paths.outputs.wordcloud),
+        "--final-report-output",
+        str(final_report_output),
+        "--qa-chunks-output",
+        str(qa_chunks_output),
+        "--model-name",
+        model_name,
+        "--progress-file",
+        str(hermes_progress),
+        "--summary-script",
+        summary_dep["entrypoint"],
+        "--wordcloud-script",
+        wordcloud_dep["entrypoint"],
+        "--single-platform",
+        *build_wordcloud_font_args(),
+    ]
+    hermes_dcd_single_platform_command = [
+        sys.executable,
+        str(HERMES_OUTPUTS),
+        "--autohome-input",
+        str(zj_output),
+        "--dcd-input",
+        str(dcd_output),
         "--summary-output",
         str(summary_output),
         "--terms-output",
@@ -237,7 +268,11 @@ def build_stage_commands(
             cwd=HERMES_OUTPUTS.parent,
             command=hermes_dual_command,
             core=True,
-            fallback_command=hermes_single_platform_command,
+            fallback_command=hermes_autohome_single_platform_command,
+            fallback_commands_by_stage={
+                "collecting_autohome": hermes_autohome_single_platform_command,
+                "collecting_dcd": hermes_dcd_single_platform_command,
+            },
             expected_artifacts=(
                 str(summary_output),
                 str(summary_output.with_suffix(".validation.json")),

@@ -1152,7 +1152,10 @@ def _run_rule_fallback(
         str(progress_file),
     ]
     if single_platform or not dcd_input or not dcd_input.exists():
-        summary_command.extend(["--input", str(autohome_input)])
+        single_input = autohome_input if autohome_input.exists() else dcd_input
+        if single_input is None:
+            single_input = autohome_input
+        summary_command.extend(["--input", str(single_input)])
     else:
         summary_command.extend(["--autohome-input", str(autohome_input), "--dcd-input", str(dcd_input)])
     _run_checked(summary_command, cwd=summary_script.parent)

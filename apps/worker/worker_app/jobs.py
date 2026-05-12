@@ -50,7 +50,7 @@ COLLECTOR_STAGE_NAMES = {"collecting_autohome", "collecting_dcd"}
 class CollectorGroupResult:
     completed_stages: list[str] = field(default_factory=list)
     degraded: bool = False
-    single_platform_mode: bool = False
+    single_platform_stage: str | None = None
     failed_result: PipelineResult | None = None
 
 
@@ -67,9 +67,9 @@ def _looks_like_parallel_collector_group(
     stage_commands: list[StageCommand],
     index: int,
     *,
-    single_platform_mode: bool,
+    single_platform_stage: str | None,
 ) -> bool:
-    if single_platform_mode or index + 1 >= len(stage_commands):
+    if single_platform_stage or index + 1 >= len(stage_commands):
         return False
     current_stage = stage_commands[index]
     next_stage = stage_commands[index + 1]
@@ -229,7 +229,7 @@ def _run_parallel_collectors(
     stages = [(stage_commands[start_index], start_index + 1), (stage_commands[start_index + 1], start_index + 2)]
     resolved_stages: list[tuple[StageCommand, StageCommand, int]] = []
     for stage, stage_index in stages:
-        resolved_stage = resolve_stage_command(stage, single_platform_mode=False)
+        resolved_stage = resolve_stage_command(stage)
         if resolved_stage is None:
             continue
         resolved_stages.append((stage, resolved_stage, stage_index))
@@ -261,9 +261,8 @@ def _run_parallel_collectors(
                 errors[stage.name] = exc
 
     completed_stages: list[str] = []
-    dcd_failed = "collecting_dcd" in errors
-    autohome_succeeded = "collecting_autohome" in results
-    can_single_platform_fallback = context.allow_single_platform_fallback and autohome_succeeded and dcd_failed and len(errors) == 1
+    can_single_platform_fallback = context.allow_single_platform_fallback and len(results) == 1 and len(errors) == 1
+    single_platform_stage = next(iter(results), None) if can_single_platform_fallback else None
 
     if not errors or can_single_platform_fallback:
         for stage, _resolved_stage, stage_index in resolved_stages:
@@ -281,12 +280,13 @@ def _run_parallel_collectors(
                 )
 
         if can_single_platform_fallback:
-            dcd_stage, dcd_index = stage_by_name["collecting_dcd"]
-            exc = errors["collecting_dcd"]
+            failed_name = next(iter(errors))
+            failed_stage, failed_index = stage_by_name[failed_name]
+            exc = errors[failed_name]
             _stage_degraded(
                 context=context,
-                stage=dcd_stage,
-                stage_index=dcd_index,
+                stage=failed_stage,
+                stage_index=failed_index,
                 total=total,
                 message=f"single-platform fallback after {exc.stage}",
                 error_code=exc.error_code,
@@ -297,13 +297,12 @@ def _run_parallel_collectors(
             return CollectorGroupResult(
                 completed_stages=completed_stages,
                 degraded=True,
-                single_platform_mode=True,
+                single_platform_stage=single_platform_stage,
             )
 
         return CollectorGroupResult(
             completed_stages=completed_stages,
             degraded=degraded,
-            single_platform_mode=False,
         )
 
     for stage, _resolved_stage, stage_index in resolved_stages:
@@ -360,12 +359,12 @@ def run_pipeline(
     completed_stages: list[str] = []
     degraded = False
     collector_failures: set[str] = set()
-    single_platform_mode = False
+    single_platform_stage: str | None = None
 
     total = max(len(stage_commands), 1)
     index = 0
     while index < len(stage_commands):
-        if _looks_like_parallel_collector_group(stage_commands, index, single_platform_mode=single_platform_mode):
+        if _looks_like_parallel_collector_group(stage_commands, index, single_platform_stage=single_platform_stage):
             group_result = _run_parallel_collectors(
                 context=context,
                 stage_commands=stage_commands,
@@ -379,7 +378,7 @@ def run_pipeline(
             )
             completed_stages.extend(group_result.completed_stages)
             degraded = group_result.degraded
-            single_platform_mode = group_result.single_platform_mode
+            single_platform_stage = group_result.single_platform_stage
             if group_result.failed_result is not None:
                 _emit(
                     observer,
@@ -395,7 +394,7 @@ def run_pipeline(
 
         stage = stage_commands[index]
         stage_index = index + 1
-        resolved_stage = resolve_stage_command(stage, single_platform_mode=single_platform_mode)
+        resolved_stage = resolve_stage_command(stage, single_platform_stage=single_platform_stage)
         if resolved_stage is None:
             degraded = True
             _stage_degraded(
@@ -439,16 +438,17 @@ def run_pipeline(
             )
         except StageExecutionError as exc:
             is_collector = stage.name in {"collecting_autohome", "collecting_dcd"}
+            other_collector = "collecting_dcd" if stage.name == "collecting_autohome" else "collecting_autohome"
             can_fallback = (
-                stage.name == "collecting_dcd"
+                is_collector
                 and context.allow_single_platform_fallback
-                and "collecting_autohome" in completed_stages
+                and other_collector in completed_stages
                 and not collector_failures
             )
             if is_collector and can_fallback:
                 collector_failures.add(stage.name)
                 degraded = True
-                single_platform_mode = True
+                single_platform_stage = other_collector
                 _stage_degraded(
                     context=context,
                     stage=stage,
