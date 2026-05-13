@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -23,6 +24,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from threading import Lock
+from threading import current_thread, main_thread
 from typing import Any
 
 import requests
@@ -112,6 +114,10 @@ SECTION_KEY_TO_LABEL = {
     "service": "服务",
 }
 LLM_METRICS_LOCK = Lock()
+
+
+class _AggregateHardTimeout(BaseException):
+    pass
 
 
 @dataclass(frozen=True)
@@ -1022,6 +1028,8 @@ def _new_llm_metrics(*, mode: str, batch_model: str, aggregate_model: str, comme
         "parse_errors": {"batch": 0, "aggregate": 0},
         "fallbacks": {"batch": [], "aggregate": None},
         "durations_ms": {"batch": 0, "aggregate": 0, "total": 0},
+        "wall_durations_ms": {"batch": 0, "aggregate": 0, "total": 0},
+        "duration_note": "durations_ms sums per-call durations; wall_durations_ms records elapsed wall time.",
     }
 
 
@@ -1051,6 +1059,101 @@ def _record_llm_metrics(
         retry_count[stage] = int(retry_count.get(stage) or 0) + retries
         parse_error_counts[stage] = int(parse_error_counts.get(stage) or 0) + parse_errors
         durations[stage] = int(durations.get(stage) or 0) + duration_ms
+
+
+def _set_llm_wall_duration(metrics: dict[str, Any] | None, stage: str, started_at: float) -> None:
+    if metrics is None:
+        return
+    duration_ms = int((time.monotonic() - started_at) * 1000)
+    with LLM_METRICS_LOCK:
+        wall_durations = metrics.setdefault("wall_durations_ms", {})
+        wall_durations[stage] = duration_ms
+
+
+def _aggregate_hard_timeout_seconds(env: dict[str, str]) -> int:
+    raw = (env.get("HERMES_AGGREGATE_TIMEOUT_SECONDS") or env.get("HERMES_TIMEOUT_SECONDS") or "180").strip()
+    try:
+        return max(int(raw), 1)
+    except (TypeError, ValueError):
+        return 180
+
+
+def _can_use_signal_hard_timeout() -> bool:
+    return (
+        current_thread() is main_thread()
+        and hasattr(signal, "SIGALRM")
+        and hasattr(signal, "ITIMER_REAL")
+        and hasattr(signal, "setitimer")
+    )
+
+
+def _call_aggregate_llm_json(
+    prompt: str,
+    *,
+    hermes_command: str,
+    env: dict[str, str],
+    model: str,
+    debug_dir: Path | None,
+    call_label: str,
+    metrics: dict[str, Any] | None,
+    metric_stage: str,
+) -> Any:
+    hard_timeout_seconds = _aggregate_hard_timeout_seconds(env)
+    started_at = time.monotonic()
+
+    if _hermes_llm_mode(env) != "api" or not _can_use_signal_hard_timeout():
+        try:
+            return _call_llm_json(
+                prompt,
+                hermes_command=hermes_command,
+                env=env,
+                model=model,
+                debug_dir=debug_dir,
+                call_label=call_label,
+                metrics=metrics,
+                metric_stage=metric_stage,
+            )
+        finally:
+            _set_llm_wall_duration(metrics, metric_stage, started_at)
+
+    old_handler = signal.getsignal(signal.SIGALRM)
+    old_timer = signal.getitimer(signal.ITIMER_REAL)
+
+    def raise_hard_timeout(_signum: int, _frame: Any) -> None:
+        raise _AggregateHardTimeout(f"aggregate_hard_timeout:{_safe_debug_label(call_label)}:{hard_timeout_seconds}s")
+
+    signal.signal(signal.SIGALRM, raise_hard_timeout)
+    signal.setitimer(signal.ITIMER_REAL, hard_timeout_seconds)
+    try:
+        return _call_llm_json(
+            prompt,
+            hermes_command=hermes_command,
+            env=env,
+            model=model,
+            debug_dir=debug_dir,
+            call_label=call_label,
+            metrics=metrics,
+            metric_stage=metric_stage,
+        )
+    except _AggregateHardTimeout as exc:
+        reason = str(exc) or f"aggregate_hard_timeout:{_safe_debug_label(call_label)}:{hard_timeout_seconds}s"
+        _write_hermes_debug(debug_dir, label=call_label, attempt=1, kind="timeout", content=f"hard timed out after {hard_timeout_seconds} seconds")
+        _record_llm_metrics(
+            metrics,
+            stage=metric_stage,
+            prompt=prompt,
+            output="",
+            retries=0,
+            parse_errors=0,
+            started_at=started_at,
+        )
+        raise RuntimeError(reason) from exc
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+        if old_timer[0] > 0 or old_timer[1] > 0:
+            signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
+        _set_llm_wall_duration(metrics, metric_stage, started_at)
 
 
 def _call_deepseek_json(
@@ -1893,6 +1996,7 @@ def _analyze_fact_batches(
     metrics["batch_concurrency"] = concurrency
     batch_payloads: list[dict[str, Any] | None] = [None] * total_batches
     batch_fallbacks: list[dict[str, Any]] = []
+    batch_wall_started_at = time.monotonic()
 
     def run_one(index: int, fact_batch: list[dict[str, Any]]) -> tuple[int, dict[str, Any], dict[str, Any] | None]:
         prompt = _build_fact_batch_prompt(model_name=model_name, batch_index=index, total_batches=total_batches, facts=fact_batch)
@@ -1948,6 +2052,7 @@ def _analyze_fact_batches(
     ordered_payloads = [payload for payload in batch_payloads if isinstance(payload, dict)]
     batch_fallbacks.sort(key=lambda item: int(item.get("batch") or 0))
     metrics["fallbacks"]["batch"] = batch_fallbacks
+    _set_llm_wall_duration(metrics, "batch", batch_wall_started_at)
     return ordered_payloads, batch_fallbacks
 
 
@@ -2026,9 +2131,10 @@ def generate_outputs(
             aggregate_timeout = (active_env.get("HERMES_AGGREGATE_TIMEOUT_SECONDS") or "").strip()
             if aggregate_timeout:
                 aggregate_env["HERMES_TIMEOUT_SECONDS"] = aggregate_timeout
+            aggregate_prompt = _build_aggregate_prompt(model_name=model_name, comments=comments, batch_payloads=batch_payloads)
             try:
-                aggregate_payload = _call_llm_json(
-                    _build_aggregate_prompt(model_name=model_name, comments=comments, batch_payloads=batch_payloads),
+                aggregate_payload = _call_aggregate_llm_json(
+                    aggregate_prompt,
                     hermes_command=hermes_command,
                     env=aggregate_env,
                     model=aggregate_model,
@@ -2055,6 +2161,7 @@ def generate_outputs(
             _write_validation(summary_path.with_suffix(".validation.json"), source=aggregate_source, degraded=False)
             llm_metrics["source"] = aggregate_source
             llm_metrics["durations_ms"]["total"] = int((time.monotonic() - metrics_started_at) * 1000)
+            _set_llm_wall_duration(llm_metrics, "total", metrics_started_at)
             _write_llm_metrics(llm_metrics_path, llm_metrics)
             _write_progress(progress_path, percent=100, message="Hermes 输出已生成")
             result = {
@@ -2083,6 +2190,7 @@ def generate_outputs(
     llm_metrics["source"] = "rule-fallback"
     llm_metrics["fallback_reason"] = fallback_reason
     llm_metrics["durations_ms"]["total"] = int((time.monotonic() - metrics_started_at) * 1000)
+    _set_llm_wall_duration(llm_metrics, "total", metrics_started_at)
     _write_llm_metrics(llm_metrics_path, llm_metrics)
     fallback = _run_rule_fallback(
         autohome_input=autohome_path,
@@ -2186,9 +2294,10 @@ def generate_time_report_outputs(
     aggregate_timeout = (active_env.get("HERMES_AGGREGATE_TIMEOUT_SECONDS") or "").strip()
     if aggregate_timeout:
         aggregate_env["HERMES_TIMEOUT_SECONDS"] = aggregate_timeout
+    aggregate_prompt = _build_aggregate_prompt(model_name=model_name, comments=selected_comments, batch_payloads=batch_payloads)
     try:
-        aggregate_payload = _call_llm_json(
-            _build_aggregate_prompt(model_name=model_name, comments=selected_comments, batch_payloads=batch_payloads),
+        aggregate_payload = _call_aggregate_llm_json(
+            aggregate_prompt,
             hermes_command=hermes_command,
             env=aggregate_env,
             model=aggregate_model,
@@ -2220,6 +2329,7 @@ def generate_time_report_outputs(
     _write_validation(validation_path, source=aggregate_source, degraded=False)
     llm_metrics["source"] = aggregate_source
     llm_metrics["durations_ms"]["total"] = int((time.monotonic() - metrics_started_at) * 1000)
+    _set_llm_wall_duration(llm_metrics, "total", metrics_started_at)
     _write_llm_metrics(llm_metrics_path, llm_metrics)
     _write_progress(progress_path, percent=100, message="时间范围 Hermes 一页纸已生成")
 

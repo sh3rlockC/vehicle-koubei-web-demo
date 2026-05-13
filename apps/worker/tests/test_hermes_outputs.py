@@ -704,6 +704,160 @@ else:
     assert "车机" in report["headline"]
 
 
+def test_generate_outputs_hard_times_out_slow_api_aggregate(monkeypatch, tmp_path: Path) -> None:
+    zj_path, dcd_path = _write_input_workbooks(tmp_path)
+    summary_script = tmp_path / "summary.py"
+    wordcloud_script = tmp_path / "wordcloud.py"
+    _write_fake_summary_script(summary_script)
+    _write_fake_wordcloud_script(wordcloud_script)
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, content: dict[str, object]) -> None:
+            self._content = json.dumps(content, ensure_ascii=False)
+            self.text = json.dumps({"choices": [{"message": {"content": self._content}}]}, ensure_ascii=False)
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": self._content}}]}
+
+    def fake_post(_url: str, *, headers: dict[str, str], json: dict[str, object], timeout: int) -> FakeResponse:
+        prompt = json["messages"][1]["content"]
+        if "请归并各批分析结果" in str(prompt):
+            import time
+
+            time.sleep(2)
+            return FakeResponse(
+                {
+                    "headline": "API 汇总慢但最终返回",
+                    "executive_summary": "慢响应不应覆盖硬截止后的本地归并。",
+                    "strength_blocks": [],
+                    "weakness_blocks": [],
+                    "platform_difference_blocks": [],
+                    "action_blocks": [],
+                    "boss_brief": [],
+                    "keyword_rankings": {"positive": [], "negative": []},
+                    "qa_chunks": [],
+                    "compare_rows": [],
+                    "opportunity_rows": [],
+                }
+            )
+        return FakeResponse(
+            {
+                "themes": [
+                    {"direction": "positive", "term": "空间", "count": 2, "summary": "空间大", "evidence_ids": ["autohome_0001"]},
+                    {"direction": "negative", "term": "车机", "count": 1, "summary": "车机卡顿", "evidence_ids": ["dcd_0001"]},
+                ],
+                "suggestions": [],
+                "platform_notes": [],
+                "boss_brief": [],
+            }
+        )
+
+    monkeypatch.setattr("worker_app.hermes_outputs.requests.post", fake_post)
+
+    result = generate_outputs(
+        autohome_input=zj_path,
+        dcd_input=dcd_path,
+        postprocess_input=tmp_path / "dual.xlsx",
+        summary_output=tmp_path / "summary" / "测试车_双平台口碑摘要.xlsx",
+        terms_output=tmp_path / "wordcloud" / "测试车_词云词项清单.xlsx",
+        wordcloud_output_dir=tmp_path / "wordcloud",
+        final_report_output=tmp_path / "ai" / "final_report.json",
+        qa_chunks_output=tmp_path / "ai" / "qa_chunks.json",
+        model_name="测试车",
+        progress_file=tmp_path / "progress" / "generating_hermes_outputs.progress.json",
+        summary_script=summary_script,
+        wordcloud_script=wordcloud_script,
+        hermes_command=str(tmp_path / "missing-hermes"),
+        env={
+            **os.environ,
+            "LLM_API_KEY": "test-key",
+            "LLM_BASE_URL": "https://api.deepseek.com",
+            "LLM_MODEL_BATCH": "deepseek-v4-flash",
+            "LLM_MODEL_REPORT": "deepseek-v4-pro",
+            "HERMES_LLM_MODE": "api",
+            "HERMES_BATCH_TARGET_BYTES": "50000",
+            "HERMES_BATCH_CONCURRENCY": "1",
+            "HERMES_AGGREGATE_TIMEOUT_SECONDS": "1",
+            "HERMES_JSON_RETRIES": "0",
+            "HERMES_RETRY_BASE_SECONDS": "0",
+        },
+    )
+
+    metrics = json.loads(Path(result["llm_metrics_path"]).read_text(encoding="utf-8"))
+    report = json.loads(Path(result["final_report_path"]).read_text(encoding="utf-8"))
+    assert result["source"] == "hermes-deepseek-api-local-aggregate"
+    assert result["aggregate_fallback_reason"] == "aggregate_hard_timeout:aggregate:1s"
+    assert report["headline"] != "API 汇总慢但最终返回"
+    assert metrics["fallbacks"]["aggregate"] == "aggregate_hard_timeout:aggregate:1s"
+
+
+def test_generate_outputs_metrics_include_wall_clock_durations(tmp_path: Path) -> None:
+    zj_path, dcd_path = _write_input_workbooks(tmp_path)
+    summary_script = tmp_path / "summary.py"
+    wordcloud_script = tmp_path / "wordcloud.py"
+    fake_hermes = tmp_path / "hermes"
+    _write_fake_summary_script(summary_script)
+    _write_fake_wordcloud_script(wordcloud_script)
+    fake_hermes.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+
+prompt = sys.argv[-1]
+if "请归并各批分析结果" in prompt:
+    print(json.dumps({
+        "headline": "测试车报告完成。",
+        "executive_summary": "汇总完成。",
+        "strength_blocks": [{"title": "核心好评", "summary": "空间大", "evidence_ids": ["autohome_0001"]}],
+        "weakness_blocks": [{"title": "核心槽点", "summary": "车机卡顿", "evidence_ids": ["dcd_0001"]}],
+        "platform_difference_blocks": [],
+        "action_blocks": [{"title": "产品建议", "summary": "优化车机", "evidence_ids": ["dcd_0001"]}],
+        "boss_brief": ["报告完成"],
+        "keyword_rankings": {"positive": [{"term": "空间", "count": 1}], "negative": [{"term": "车机", "count": 1}]},
+        "qa_chunks": [],
+        "compare_rows": [],
+        "opportunity_rows": []
+    }, ensure_ascii=False))
+else:
+    print(json.dumps({
+        "themes": [
+            {"direction": "positive", "term": "空间", "count": 1, "summary": "空间大", "evidence_ids": ["autohome_0001"]},
+            {"direction": "negative", "term": "车机", "count": 1, "summary": "车机卡顿", "evidence_ids": ["dcd_0001"]}
+        ],
+        "suggestions": [],
+        "platform_notes": [],
+        "boss_brief": []
+    }, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_hermes.chmod(0o755)
+
+    result = generate_outputs(
+        autohome_input=zj_path,
+        dcd_input=dcd_path,
+        postprocess_input=tmp_path / "dual.xlsx",
+        summary_output=tmp_path / "summary" / "测试车_双平台口碑摘要.xlsx",
+        terms_output=tmp_path / "wordcloud" / "测试车_词云词项清单.xlsx",
+        wordcloud_output_dir=tmp_path / "wordcloud",
+        final_report_output=tmp_path / "ai" / "final_report.json",
+        qa_chunks_output=tmp_path / "ai" / "qa_chunks.json",
+        model_name="测试车",
+        progress_file=tmp_path / "progress" / "generating_hermes_outputs.progress.json",
+        summary_script=summary_script,
+        wordcloud_script=wordcloud_script,
+        hermes_command=str(fake_hermes),
+        env=_cli_env(),
+    )
+
+    metrics = json.loads(Path(result["llm_metrics_path"]).read_text(encoding="utf-8"))
+    assert set(metrics["wall_durations_ms"]) == {"batch", "aggregate", "total"}
+    assert metrics["wall_durations_ms"]["total"] >= metrics["wall_durations_ms"]["batch"]
+    assert metrics["duration_note"] == "durations_ms sums per-call durations; wall_durations_ms records elapsed wall time."
+
+
 def test_generate_outputs_uses_local_batch_when_one_batch_json_remains_invalid(tmp_path: Path) -> None:
     zj_path, dcd_path = _write_input_workbooks(tmp_path)
     summary_script = tmp_path / "summary.py"
