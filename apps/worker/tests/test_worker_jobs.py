@@ -287,6 +287,8 @@ def test_build_stage_commands_uses_hermes_outputs_after_postprocess(monkeypatch,
     assert str(job_paths.outputs.summary / "测试车_双平台口碑摘要.xlsx") in hermes_stage.expected_artifacts
     assert str(job_paths.outputs.ai / "final_report.json") in hermes_stage.expected_artifacts
     assert str(job_paths.outputs.ai / "qa_chunks.json") in hermes_stage.expected_artifacts
+    assert str(job_paths.outputs.ai / "analysis_facts.jsonl") in hermes_stage.optional_artifacts
+    assert str(job_paths.outputs.ai / "llm_metrics.json") in hermes_stage.optional_artifacts
     assert "--summary-script" in hermes_stage.command
     assert "--wordcloud-script" in hermes_stage.command
     dcd_fallback = hermes_stage.fallback_commands_by_stage["collecting_dcd"]

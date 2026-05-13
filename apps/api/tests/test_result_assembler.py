@@ -40,7 +40,13 @@ def make_client(tmp_path: Path, *, raise_server_exceptions: bool = True) -> Test
     return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 
 
-def seed_result_job(job_id: str, *, term_excel_path: Path | None = None, final_report_path: Path | None = None) -> None:
+def seed_result_job(
+    job_id: str,
+    *,
+    term_excel_path: Path | None = None,
+    final_report_path: Path | None = None,
+    extra_artifact_paths: list[Path] | None = None,
+) -> None:
     fixture_root = Path("/Users/xyc/Documents/codexwork/data/26.4.7/风云X3 PLUS")
     term_excel_path = term_excel_path or fixture_root / "风云X3 PLUS_词云词项清单.xlsx"
     session = get_session_local()()
@@ -88,6 +94,15 @@ def seed_result_job(job_id: str, *, term_excel_path: Path | None = None, final_r
                     job_id=job_id,
                     artifact_type="json",
                     artifact_path=str(final_report_path),
+                    source_stage="generating_hermes_outputs",
+                )
+            )
+        for path in extra_artifact_paths or []:
+            artifacts.append(
+                JobArtifact(
+                    job_id=job_id,
+                    artifact_type="json",
+                    artifact_path=str(path),
                     source_stage="generating_hermes_outputs",
                 )
             )
@@ -271,6 +286,33 @@ def test_result_zip_download_includes_hermes_final_report_json(tmp_path: Path) -
         names = set(archive.namelist())
 
     assert "final_report.json" in names
+
+
+def test_result_zip_download_includes_hermes_facts_and_metrics(tmp_path: Path) -> None:
+    final_report = tmp_path / "final_report.json"
+    analysis_facts = tmp_path / "analysis_facts.jsonl"
+    llm_metrics = tmp_path / "llm_metrics.json"
+    final_report.write_text('{"headline":"Hermes"}', encoding="utf-8")
+    analysis_facts.write_text('{"comment_id":"autohome_0001"}\n', encoding="utf-8")
+    llm_metrics.write_text('{"source":"hermes-deepseek-api"}', encoding="utf-8")
+    client = make_client(tmp_path)
+    seed_result_job(
+        "job_zip_hermes_metrics",
+        final_report_path=final_report,
+        extra_artifact_paths=[analysis_facts, llm_metrics],
+    )
+
+    verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify.status_code == 200
+
+    response = client.get("/api/jobs/job_zip_hermes_metrics/artifacts.zip")
+
+    assert response.status_code == 200
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        names = set(archive.namelist())
+
+    assert "analysis_facts.jsonl" in names
+    assert "llm_metrics.json" in names
 
 
 def test_result_zip_download_skips_keyword_pngs_when_terms_excel_is_unreadable(tmp_path: Path) -> None:

@@ -13,10 +13,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from worker_app.hermes_outputs import (
+    _batch_items_by_prompt_budget,
+    _build_analysis_facts,
     _build_aggregate_prompt,
     _build_batch_prompt,
+    _build_fact_batch_prompt,
     _call_hermes,
+    _call_deepseek_json,
     _extract_json,
+    _normalize_deepseek_model,
     _runtime_provider,
     extract_whitelisted_comments,
     generate_outputs,
@@ -65,6 +70,10 @@ def _write_time_range_workbooks(tmp_path: Path) -> tuple[Path, Path]:
     dcd_workbook.save(dcd_path)
 
     return zj_path, dcd_path
+
+
+def _cli_env(**overrides: str) -> dict[str, str]:
+    return {**os.environ, "LLM_API_KEY": "test-key", "LLM_MODEL_REPORT": "deepseek-chat", "HERMES_LLM_MODE": "cli", **overrides}
 
 
 def test_extract_whitelisted_comments_removes_private_fields(tmp_path: Path) -> None:
@@ -174,8 +183,107 @@ def test_runtime_provider_prefers_deepseek_provider_even_with_base_url() -> None
     )
 
     assert provider == "deepseek"
-    assert model == "deepseekv4pro"
+    assert model == "deepseek-v4-pro"
     assert env["DEEPSEEK_API_KEY"] == "test-key"
+
+
+def test_normalize_deepseek_model_maps_legacy_aliases_to_official_ids() -> None:
+    assert _normalize_deepseek_model("deepseekv4pro") == "deepseek-v4-pro"
+    assert _normalize_deepseek_model("deepseek-v4pro") == "deepseek-v4-pro"
+    assert _normalize_deepseek_model("deepseek-v4-flash") == "deepseek-v4-flash"
+
+
+def test_deepseek_json_client_uses_json_mode_and_selected_model(monkeypatch, tmp_path: Path) -> None:
+    requests_seen: list[dict[str, object]] = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"choices":[{"message":{"content":"{\\"themes\\":[]}"}}]}'
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": '{"themes":[]}'}}]}
+
+    def fake_post(url: str, *, headers: dict[str, str], json: dict[str, object], timeout: int) -> FakeResponse:
+        requests_seen.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr("worker_app.hermes_outputs.requests.post", fake_post)
+
+    payload = _call_deepseek_json(
+        "只返回 JSON",
+        env={
+            "LLM_API_KEY": "test-key",
+            "LLM_BASE_URL": "https://api.deepseek.com",
+            "HERMES_TIMEOUT_SECONDS": "7",
+            "HERMES_JSON_RETRIES": "0",
+        },
+        model="deepseek-v4-flash",
+        debug_dir=tmp_path / "debug",
+        call_label="batch_001",
+    )
+
+    assert payload == {"themes": []}
+    assert requests_seen[0]["url"] == "https://api.deepseek.com/chat/completions"
+    assert requests_seen[0]["headers"] == {"Authorization": "Bearer test-key"}
+    body = requests_seen[0]["json"]
+    assert body["model"] == "deepseek-v4-flash"
+    assert body["response_format"] == {"type": "json_object"}
+    assert body["messages"][0]["role"] == "system"
+    assert body["messages"][1]["content"] == "只返回 JSON"
+
+
+def test_analysis_facts_keep_all_comments_private_and_compact(tmp_path: Path) -> None:
+    zj_path, dcd_path = _write_time_range_workbooks(tmp_path)
+    comments = extract_whitelisted_comments(autohome_input=zj_path, dcd_input=dcd_path, model_name="测试车")
+
+    facts = _build_analysis_facts(comments)
+
+    assert len(facts) == len(comments)
+    assert {fact["comment_id"] for fact in facts} == {comment["comment_id"] for comment in comments}
+    serialized = json.dumps(facts, ensure_ascii=False)
+    assert "张三" not in serialized
+    assert "李四" not in serialized
+    assert "example.invalid" not in serialized
+    assert "上海浦东" not in serialized
+    assert "北京朝阳" not in serialized
+    assert all(len(fact["compact_text"]) <= 240 for fact in facts)
+    assert all(len(value) <= 70 for fact in facts for value in fact["section_facts"].values())
+    assert all(fact["local_keywords"] for fact in facts)
+
+
+def test_fact_batch_prompt_uses_facts_and_dynamic_byte_budget() -> None:
+    facts = [
+        {
+            "comment_id": f"comment_{index:04d}",
+            "platform": "汽车之家",
+            "date": "2026-03-01",
+            "model_name": "测试车",
+            "polarity": "mixed",
+            "local_keywords": ["空间"],
+            "compact_text": "空间大；车机卡顿" * 20,
+            "section_facts": {"positive": "空间大", "negative": "车机卡顿"},
+        }
+        for index in range(20)
+    ]
+
+    batches = _batch_items_by_prompt_budget(
+        facts,
+        target_bytes=2500,
+        prompt_builder=lambda index, total, batch: _build_fact_batch_prompt(
+            model_name="测试车",
+            batch_index=index,
+            total_batches=total,
+            facts=batch,
+        ),
+    )
+
+    assert len(batches) > 1
+    assert sum(len(batch) for batch in batches) == len(facts)
+    for index, batch in enumerate(batches, start=1):
+        prompt = _build_fact_batch_prompt(model_name="测试车", batch_index=index, total_batches=len(batches), facts=batch)
+        assert len(prompt.encode("utf-8")) <= 2500
+        assert "raw_comment" not in prompt
+        assert "full_text" not in prompt
 
 
 def test_aggregate_prompt_compacts_large_batch_payloads() -> None:
@@ -265,7 +373,7 @@ def test_call_hermes_timeout_uses_concise_error_without_prompt(tmp_path: Path) -
         _call_hermes(
             "SECRET_PROMPT_SHOULD_NOT_APPEAR",
             hermes_command=str(fake_hermes),
-            env={**os.environ, "LLM_API_KEY": "test-key", "LLM_MODEL_REPORT": "deepseek-chat", "HERMES_TIMEOUT_SECONDS": "1"},
+            env=_cli_env(HERMES_TIMEOUT_SECONDS="1"),
             call_label="aggregate",
         )
 
@@ -356,7 +464,7 @@ print(json.dumps({"excel_path": str(terms), "image_paths": images}, ensure_ascii
     )
 
 
-def test_generate_outputs_falls_back_when_hermes_json_is_invalid(tmp_path: Path) -> None:
+def test_generate_outputs_uses_local_aggregate_when_all_hermes_json_is_invalid(tmp_path: Path) -> None:
     zj_path, dcd_path = _write_input_workbooks(tmp_path)
     summary_script = tmp_path / "summary.py"
     wordcloud_script = tmp_path / "wordcloud.py"
@@ -380,12 +488,14 @@ def test_generate_outputs_falls_back_when_hermes_json_is_invalid(tmp_path: Path)
         summary_script=summary_script,
         wordcloud_script=wordcloud_script,
         hermes_command=str(fake_hermes),
-        env={**os.environ, "LLM_API_KEY": "test-key", "LLM_MODEL_REPORT": "deepseek-chat"},
+        env=_cli_env(),
     )
 
-    assert result["status"] == "degraded"
-    assert result["degraded"] is True
-    assert result["fallback_reason"].startswith("hermes_invalid_json")
+    assert result["status"] == "success"
+    assert result["degraded"] is False
+    assert result["source"] == "hermes-local-aggregate"
+    assert result["batch_fallbacks"][0]["reason"].startswith("hermes_invalid_json")
+    assert result["aggregate_fallback_reason"].startswith("hermes_invalid_json")
     assert Path(result["summary_path"]).exists()
     assert Path(result["terms_path"]).exists()
     assert Path(result["final_report_path"]).exists()
@@ -420,7 +530,7 @@ def test_generate_outputs_rule_fallback_uses_dcd_input_when_autohome_is_missing(
         wordcloud_script=wordcloud_script,
         hermes_command=str(fake_hermes),
         single_platform=True,
-        env={**os.environ, "LLM_API_KEY": "test-key", "LLM_MODEL_REPORT": "deepseek-chat"},
+        env={**os.environ, "LLM_API_KEY": "", "DEEPSEEK_API_KEY": "", "HERMES_LLM_MODE": "cli"},
     )
 
     summary_args = json.loads(summary_output.with_suffix(".args.json").read_text(encoding="utf-8"))
@@ -499,7 +609,7 @@ else:
         summary_script=summary_script,
         wordcloud_script=wordcloud_script,
         hermes_command=str(fake_hermes),
-        env={**os.environ, "LLM_API_KEY": "test-key", "LLM_MODEL_REPORT": "deepseek-chat", "HERMES_JSON_RETRIES": "1"},
+        env=_cli_env(HERMES_JSON_RETRIES="1"),
     )
 
     assert result["status"] == "success"
@@ -511,6 +621,11 @@ else:
     assert normalized_comment["comment_id"] == "autohome_0001"
     assert "raw_comment" in normalized_comment
     assert "sections" in normalized_comment["raw_comment"]
+    analysis_facts_path = Path(result["analysis_facts_path"])
+    llm_metrics_path = Path(result["llm_metrics_path"])
+    assert analysis_facts_path.exists()
+    assert llm_metrics_path.exists()
+    assert json.loads(llm_metrics_path.read_text(encoding="utf-8"))["fact_count"] == 2
     assert (tmp_path / "logs" / "hermes" / "batch_001.attempt_1.stdout.txt").exists()
     assert (tmp_path / "logs" / "hermes" / "batch_001.attempt_1.parse_error.txt").exists()
 
@@ -560,12 +675,7 @@ else:
         summary_script=summary_script,
         wordcloud_script=wordcloud_script,
         hermes_command=str(fake_hermes),
-        env={
-            **os.environ,
-            "LLM_API_KEY": "test-key",
-            "LLM_MODEL_REPORT": "deepseek-chat",
-            "HERMES_TIMEOUT_SECONDS": "1",
-        },
+        env=_cli_env(HERMES_TIMEOUT_SECONDS="1"),
     )
 
     assert result["status"] == "success"
@@ -646,13 +756,7 @@ else:
         summary_script=summary_script,
         wordcloud_script=wordcloud_script,
         hermes_command=str(fake_hermes),
-        env={
-            **os.environ,
-            "LLM_API_KEY": "test-key",
-            "LLM_MODEL_REPORT": "deepseek-chat",
-            "HERMES_BATCH_SIZE": "1",
-            "HERMES_JSON_RETRIES": "1",
-        },
+        env=_cli_env(HERMES_BATCH_TARGET_BYTES="900", HERMES_BATCH_CONCURRENCY="1", HERMES_JSON_RETRIES="1"),
     )
 
     assert result["status"] == "success"
@@ -713,7 +817,7 @@ print(json.dumps({
         summary_script=summary_script,
         wordcloud_script=wordcloud_script,
         hermes_command=str(fake_hermes),
-        env={**os.environ, "LLM_API_KEY": "test-key", "LLM_MODEL_REPORT": "deepseek-chat"},
+        env=_cli_env(),
     )
 
     assert result["status"] == "success"
@@ -775,7 +879,7 @@ else:
         start_date="2026-03-02",
         end_date="2026-03-03",
         hermes_command=str(fake_hermes),
-        env={**os.environ, "LLM_API_KEY": "test-key", "LLM_MODEL_REPORT": "deepseek-chat", "HERMES_BATCH_SIZE": "1"},
+        env=_cli_env(HERMES_BATCH_TARGET_BYTES="900", HERMES_BATCH_CONCURRENCY="1"),
     )
 
     assert result["status"] == "completed"
@@ -872,7 +976,9 @@ else:
             **os.environ,
             "LLM_API_KEY": "test-key",
             "LLM_MODEL_REPORT": "deepseek-chat",
-            "HERMES_BATCH_SIZE": "1",
+            "HERMES_LLM_MODE": "cli",
+            "HERMES_BATCH_TARGET_BYTES": "900",
+            "HERMES_BATCH_CONCURRENCY": "1",
             "HERMES_TIMEOUT_SECONDS": "1",
         },
     )
@@ -930,7 +1036,7 @@ print(json.dumps({
         summary_script=summary_script,
         wordcloud_script=wordcloud_script,
         hermes_command=str(fake_hermes),
-        env={**os.environ, "LLM_API_KEY": "test-key", "LLM_MODEL_REPORT": "deepseek-chat"},
+        env=_cli_env(),
     )
 
     assert result["status"] == "success"

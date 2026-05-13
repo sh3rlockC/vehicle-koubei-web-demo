@@ -92,6 +92,8 @@ def build_stage_commands(
     final_report_output = job_paths.outputs.ai / "final_report.json"
     qa_chunks_output = job_paths.outputs.ai / "qa_chunks.json"
     normalized_comments_output = job_paths.outputs.ai / "normalized_comments.jsonl"
+    analysis_facts_output = job_paths.outputs.ai / "analysis_facts.jsonl"
+    llm_metrics_output = job_paths.outputs.ai / "llm_metrics.json"
     autohome_progress = job_paths.progress / "collecting_autohome.progress.json"
     dcd_progress = job_paths.progress / "collecting_dcd.progress.json"
     hermes_progress = job_paths.progress / "generating_hermes_outputs.progress.json"
@@ -286,6 +288,8 @@ def build_stage_commands(
                 str(job_paths.outputs.wordcloud / f"{model_name}_优点词云.png"),
                 str(job_paths.outputs.wordcloud / f"{model_name}_槽点词云.png"),
                 str(normalized_comments_output),
+                str(analysis_facts_output),
+                str(llm_metrics_output),
             ),
             progress_file=str(hermes_progress),
             parse_json_stdout=True,

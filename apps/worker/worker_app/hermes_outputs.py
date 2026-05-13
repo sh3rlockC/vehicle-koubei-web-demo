@@ -9,22 +9,41 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
+import requests
 from openpyxl import Workbook, load_workbook
 
 
 PLATFORM_AUTOHOME = "汽车之家"
 PLATFORM_DCD = "懂车帝"
-DEFAULT_BATCH_SIZE = 20
+DEFAULT_BATCH_TARGET_BYTES = 45_000
+DEFAULT_BATCH_CONCURRENCY = 3
+DEFAULT_BATCH_MODEL = "deepseek-v4-flash"
+DEFAULT_REPORT_MODEL = "deepseek-v4-pro"
+MAX_FACT_TEXT_CHARS = 240
+MAX_FACT_SENTIMENT_CHARS = 70
+MAX_FACT_SECTION_CHARS = 35
+MAX_FACT_TOPIC_SECTIONS = 2
 MAX_REPAIR_RESPONSE_CHARS = 120_000
 MAX_AGGREGATE_THEMES_PER_DIRECTION = 2
 MAX_AGGREGATE_SUGGESTIONS = 1
 MAX_AGGREGATE_PLATFORM_NOTES = 1
 MAX_AGGREGATE_PAYLOAD_BYTES = 70_000
+DEEPSEEK_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+DEEPSEEK_MODEL_ALIASES = {
+    "deepseekv4pro": "deepseek-v4-pro",
+    "deepseek-v4pro": "deepseek-v4-pro",
+    "deepseek_v4_pro": "deepseek-v4-pro",
+    "deepseekv4flash": "deepseek-v4-flash",
+    "deepseek-v4flash": "deepseek-v4-flash",
+    "deepseek_v4_flash": "deepseek-v4-flash",
+}
 LEGACY_LABEL_REPLACEMENTS = {
     "核心卖点TOP": "最满意TOP",
     "核心槽点TOP": "最不满意TOP",
@@ -57,6 +76,33 @@ COMMENT_SECTION_LABEL_PATTERN = "|".join(
 COMMENT_SECTION_RE = re.compile(
     rf"(?:【(?P<bracket>{COMMENT_SECTION_LABEL_PATTERN})】|\[(?P<square>{COMMENT_SECTION_LABEL_PATTERN})\]|(?P<plain>{COMMENT_SECTION_LABEL_PATTERN})\s*[：:])"
 )
+LOCAL_KEYWORD_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("空间", ("空间", "二排", "三排", "后排", "座椅", "储物", "宽敞")),
+    ("动力", ("动力", "加速", "提速", "发动机", "电机", "爬坡")),
+    ("续航能耗", ("续航", "能耗", "油耗", "电耗", "馈电", "充电")),
+    ("智能化", ("车机", "智能", "智驾", "辅助驾驶", "语音", "导航", "NOA")),
+    ("舒适性", ("舒适", "底盘", "悬架", "胎噪", "风噪", "隔音", "震动", "NVH")),
+    ("外观内饰", ("外观", "造型", "内饰", "用料", "座舱", "屏幕")),
+    ("配置价格", ("配置", "价格", "性价比", "优惠", "权益", "置换")),
+    ("服务交付", ("售后", "服务", "交付", "销售", "门店", "维修")),
+    ("安全", ("安全", "刹车", "制动", "碰撞", "气囊")),
+)
+SECTION_KEY_TO_LABEL = {
+    "positive": "最满意",
+    "negative": "最不满意",
+    "space": "空间",
+    "driving": "驾驶",
+    "range": "续航能耗",
+    "appearance": "外观",
+    "interior": "内饰",
+    "comfort": "舒适性",
+    "configuration": "配置",
+    "intelligence": "智能化",
+    "cost_value": "性价比",
+    "safety": "安全",
+    "service": "服务",
+}
+LLM_METRICS_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -398,14 +444,22 @@ def _extract_json(text: str) -> Any:
     raise ValueError("response JSON was not balanced")
 
 
-def _batch_items(values: list[dict[str, str]], batch_size: int) -> list[list[dict[str, str]]]:
-    size = max(batch_size, 1)
-    return [values[index : index + size] for index in range(0, len(values), size)]
+def _normalize_deepseek_model(model: str | None) -> str:
+    text = (model or "").strip()
+    if not text:
+        return ""
+    return DEEPSEEK_MODEL_ALIASES.get(text.lower().replace(" ", ""), text)
+
+
+def _runtime_models(env: dict[str, str]) -> tuple[str, str]:
+    batch_model = _normalize_deepseek_model(env.get("LLM_MODEL_BATCH") or DEFAULT_BATCH_MODEL)
+    report_model = _normalize_deepseek_model(env.get("LLM_MODEL_REPORT") or env.get("LLM_MODEL_QA") or DEFAULT_REPORT_MODEL)
+    return batch_model or DEFAULT_BATCH_MODEL, report_model or DEFAULT_REPORT_MODEL
 
 
 def _runtime_provider(env: dict[str, str]) -> tuple[str, str, dict[str, str]]:
     provider = (env.get("LLM_PROVIDER") or "deepseek").strip().lower()
-    model = (env.get("LLM_MODEL_REPORT") or env.get("LLM_MODEL_QA") or "deepseek-chat").strip()
+    model = _normalize_deepseek_model(env.get("LLM_MODEL_REPORT") or env.get("LLM_MODEL_QA") or DEFAULT_REPORT_MODEL)
     base_url = (env.get("LLM_BASE_URL") or "").strip()
     api_key = (env.get("LLM_API_KEY") or "").strip()
     updated_env = dict(env)
@@ -417,6 +471,21 @@ def _runtime_provider(env: dict[str, str]) -> tuple[str, str, dict[str, str]]:
     if base_url:
         return "custom:vehicle-koubei", model, updated_env
     return provider or "deepseek", model, updated_env
+
+
+def _hermes_llm_mode(env: dict[str, str]) -> str:
+    return (env.get("HERMES_LLM_MODE") or "api").strip().lower()
+
+
+def _deepseek_base_url(env: dict[str, str]) -> str:
+    return (env.get("LLM_BASE_URL") or "https://api.deepseek.com").strip().rstrip("/")
+
+
+def _int_env(env: dict[str, str], key: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        return max(int(env.get(key) or default), minimum)
+    except (TypeError, ValueError):
+        return max(default, minimum)
 
 
 def _write_hermes_config(env: dict[str, str]) -> dict[str, str]:
@@ -512,6 +581,97 @@ def _comment_for_llm(comment: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _raw_comment_for_fact(comment: dict[str, Any]) -> dict[str, Any]:
+    raw_comment = comment.get("raw_comment")
+    if isinstance(raw_comment, dict):
+        return raw_comment
+    return _standard_raw_comment(
+        positive_text=_clean_text(comment.get("positive_text"), limit=900),
+        negative_text=_clean_text(comment.get("negative_text"), limit=900),
+        full_text=_clean_text(comment.get("full_text"), limit=900),
+    )
+
+
+def _append_unique(values: list[str], value: str, *, limit: int) -> None:
+    text = _clean_text(value, limit=limit)
+    if text and text not in values:
+        values.append(text)
+
+
+def _local_keywords_for_fact(*, text: str, section_facts: dict[str, str]) -> list[str]:
+    keywords: list[str] = []
+    for section_key in section_facts:
+        label = SECTION_KEY_TO_LABEL.get(section_key)
+        if label:
+            _append_unique(keywords, label, limit=20)
+    for keyword, needles in LOCAL_KEYWORD_RULES:
+        if any(needle in text for needle in needles):
+            _append_unique(keywords, keyword, limit=20)
+    return keywords[:10] or ["整体体验"]
+
+
+def _analysis_fact_for_llm(comment: dict[str, Any]) -> dict[str, Any]:
+    raw_comment = _raw_comment_for_fact(comment)
+    positive = _clean_text(raw_comment.get("positive_text") or comment.get("positive_text"), limit=MAX_FACT_SENTIMENT_CHARS)
+    negative = _clean_text(raw_comment.get("negative_text") or comment.get("negative_text"), limit=MAX_FACT_SENTIMENT_CHARS)
+    full_text = _clean_text(raw_comment.get("full_text") or comment.get("full_text"), limit=220)
+    raw_sections = raw_comment.get("sections") if isinstance(raw_comment.get("sections"), dict) else {}
+    keyword_source = " ".join(
+        [
+            positive,
+            negative,
+            full_text,
+            *[_clean_text(value, limit=80) for value in raw_sections.values()],
+        ]
+    )
+
+    section_facts: dict[str, str] = {}
+    if positive:
+        section_facts["positive"] = positive
+    if negative:
+        section_facts["negative"] = negative
+    topic_count = 0
+    for key, value in raw_sections.items():
+        if topic_count >= MAX_FACT_TOPIC_SECTIONS:
+            break
+        text = _clean_text(value, limit=MAX_FACT_SECTION_CHARS)
+        if text:
+            section_facts[_clean_text(key, limit=40)] = text
+            topic_count += 1
+
+    compact_parts: list[str] = []
+    if positive:
+        compact_parts.append(f"最满意：{positive}")
+    if negative:
+        compact_parts.append(f"最不满意：{negative}")
+    for key, value in section_facts.items():
+        if key in {"positive", "negative"}:
+            continue
+        label = SECTION_KEY_TO_LABEL.get(key, key)
+        compact_parts.append(f"{label}：{value}")
+    if not compact_parts and full_text:
+        compact_parts.append(f"评价：{full_text}")
+    elif full_text and full_text not in "；".join(compact_parts):
+        compact_parts.append(f"补充：{full_text[:80]}")
+
+    compact_text = _clean_text("；".join(compact_parts), limit=MAX_FACT_TEXT_CHARS)
+    polarity = "mixed" if positive and negative else "positive" if positive else "negative" if negative else "neutral"
+    return {
+        "comment_id": _clean_text(comment.get("comment_id"), limit=80),
+        "platform": _clean_text(comment.get("platform"), limit=80),
+        "date": _clean_text(comment.get("date"), limit=80),
+        "model_name": _clean_text(comment.get("model_name"), limit=160),
+        "polarity": polarity,
+        "local_keywords": _local_keywords_for_fact(text=keyword_source, section_facts=section_facts)[:5],
+        "compact_text": compact_text,
+        "section_facts": section_facts,
+    }
+
+
+def _build_analysis_facts(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_analysis_fact_for_llm(comment) for comment in comments]
+
+
 def _build_batch_prompt(*, model_name: str, batch_index: int, total_batches: int, comments: list[dict[str, Any]]) -> str:
     normalized_comments = [_comment_for_llm(comment) for comment in comments]
     return (
@@ -525,6 +685,58 @@ def _build_batch_prompt(*, model_name: str, batch_index: int, total_batches: int
         "评论白名单字段如下。raw_comment 是规则拆分后的标准原评论JSON，sections 只来自明确分项标题：\n"
         + json.dumps(normalized_comments, ensure_ascii=False, default=_json_default)
     )
+
+
+def _build_fact_batch_prompt(*, model_name: str, batch_index: int, total_batches: int, facts: list[dict[str, Any]]) -> str:
+    return (
+        "你是汽车口碑分析Agent。只根据输入的脱敏评论facts分析，不引入外部资料。\n"
+        "只返回严格JSON object，不要Markdown，不要解释。JSON 字符串内部不要使用英文双引号，引用短语请用中文引号「」。\n"
+        "JSON schema: {\"batch\":\"1/3\",\"themes\":[{\"direction\":\"positive|negative\",\"term\":\"主题词\","
+        "\"count\":数字,\"summary\":\"80字内摘要\",\"keywords\":[\"词\"],\"evidence_ids\":[\"comment_id\"],"
+        "\"platform_counts\":{\"汽车之家\":0,\"懂车帝\":0}}],\"platform_notes\":[{\"platform\":\"平台\",\"summary\":\"差异\"}]}。\n"
+        "每个 theme 的 evidence_ids 只能使用输入中的 comment_id；不要复制原评论长文本；建议和老板口径留给最终汇总。\n"
+        f"车型：{model_name}；批次：{batch_index}/{total_batches}。\n"
+        "评论facts如下：\n"
+        + json.dumps(facts, ensure_ascii=False, default=_json_default)
+    )
+
+
+def _batch_items_by_prompt_budget(
+    values: list[dict[str, Any]],
+    *,
+    target_bytes: int,
+    prompt_builder: Any,
+) -> list[list[dict[str, Any]]]:
+    budget = max(target_bytes, 1_000)
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for item in values:
+        candidate = [*current, item]
+        prompt_bytes = len(prompt_builder(len(batches) + 1, 999, candidate).encode("utf-8"))
+        if current and prompt_bytes > budget:
+            batches.append(current)
+            current = [item]
+        else:
+            current = candidate
+    if current:
+        batches.append(current)
+
+    while True:
+        total = max(len(batches), 1)
+        split_index = next(
+            (
+                index
+                for index, batch in enumerate(batches)
+                if len(batch) > 1 and len(prompt_builder(index + 1, total, batch).encode("utf-8")) > budget
+            ),
+            None,
+        )
+        if split_index is None:
+            return batches
+        batch = batches.pop(split_index)
+        midpoint = max(1, len(batch) // 2)
+        batches.insert(split_index, batch[midpoint:])
+        batches.insert(split_index, batch[:midpoint])
 
 
 def _local_batch_payload(*, batch_index: int, total_batches: int, comments: list[dict[str, str]], reason: str) -> dict[str, Any]:
@@ -785,6 +997,190 @@ def _call_hermes(
                 current_prompt = _build_json_repair_prompt(raw_response=completed.stdout, parse_error=exc)
 
     raise ValueError(f"hermes_invalid_json:{parse_error}") from parse_error
+
+
+def _new_llm_metrics(*, mode: str, batch_model: str, aggregate_model: str, comment_count: int, fact_count: int) -> dict[str, Any]:
+    return {
+        "mode": mode,
+        "models": {"batch": batch_model, "aggregate": aggregate_model},
+        "comment_count": comment_count,
+        "fact_count": fact_count,
+        "batch_count": 0,
+        "calls": {"batch": 0, "aggregate": 0},
+        "prompt_bytes": {"batch": 0, "aggregate": 0},
+        "output_bytes": {"batch": 0, "aggregate": 0},
+        "retry_count": {"batch": 0, "aggregate": 0},
+        "parse_errors": {"batch": 0, "aggregate": 0},
+        "fallbacks": {"batch": [], "aggregate": None},
+        "durations_ms": {"batch": 0, "aggregate": 0, "total": 0},
+    }
+
+
+def _record_llm_metrics(
+    metrics: dict[str, Any] | None,
+    *,
+    stage: str,
+    prompt: str,
+    output: str,
+    retries: int,
+    parse_errors: int,
+    started_at: float,
+) -> None:
+    if metrics is None:
+        return
+    duration_ms = int((time.monotonic() - started_at) * 1000)
+    with LLM_METRICS_LOCK:
+        calls = metrics.setdefault("calls", {})
+        prompt_bytes = metrics.setdefault("prompt_bytes", {})
+        output_bytes = metrics.setdefault("output_bytes", {})
+        retry_count = metrics.setdefault("retry_count", {})
+        parse_error_counts = metrics.setdefault("parse_errors", {})
+        durations = metrics.setdefault("durations_ms", {})
+        calls[stage] = int(calls.get(stage) or 0) + 1
+        prompt_bytes[stage] = int(prompt_bytes.get(stage) or 0) + len(prompt.encode("utf-8"))
+        output_bytes[stage] = int(output_bytes.get(stage) or 0) + len(output.encode("utf-8"))
+        retry_count[stage] = int(retry_count.get(stage) or 0) + retries
+        parse_error_counts[stage] = int(parse_error_counts.get(stage) or 0) + parse_errors
+        durations[stage] = int(durations.get(stage) or 0) + duration_ms
+
+
+def _call_deepseek_json(
+    prompt: str,
+    *,
+    env: dict[str, str],
+    model: str,
+    debug_dir: Path | None = None,
+    call_label: str = "deepseek",
+    metrics: dict[str, Any] | None = None,
+    metric_stage: str = "batch",
+) -> Any:
+    api_key = (env.get("LLM_API_KEY") or env.get("DEEPSEEK_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("deepseek_disabled:missing_llm_api_key")
+    base_url = _deepseek_base_url(env)
+    timeout = _int_env(env, "HERMES_TIMEOUT_SECONDS", 180)
+    json_retries = max(0, _int_env(env, "HERMES_JSON_RETRIES", 1, minimum=0))
+    retry_base_seconds = float(env.get("HERMES_RETRY_BASE_SECONDS") or "0.5")
+    attempts = json_retries + 1
+    parse_error: Exception | None = None
+    last_error: Exception | None = None
+    output_text = ""
+    started_at = time.monotonic()
+    parse_errors = 0
+    retries_used = 0
+
+    request_body = {
+        "model": _normalize_deepseek_model(model),
+        "messages": [
+            {
+                "role": "system",
+                "content": "你是汽车口碑分析Agent。必须只输出一个合法 JSON object，不要输出 Markdown 或解释文字。",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"},
+    }
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    for attempt in range(attempts):
+        attempt_no = attempt + 1
+        try:
+            response = requests.post(
+                f"{base_url}/chat/completions",
+                headers=headers,
+                json=request_body,
+                timeout=timeout,
+            )
+        except requests.Timeout as exc:
+            last_error = exc
+            _write_hermes_debug(debug_dir, label=call_label, attempt=attempt_no, kind="timeout", content=f"timed out after {timeout} seconds")
+            if attempt < attempts - 1:
+                retries_used += 1
+                if retry_base_seconds > 0:
+                    time.sleep(retry_base_seconds * (2**attempt))
+                continue
+            _record_llm_metrics(metrics, stage=metric_stage, prompt=prompt, output=output_text, retries=retries_used, parse_errors=parse_errors, started_at=started_at)
+            raise RuntimeError(f"deepseek_timeout:{_safe_debug_label(call_label)}:{timeout}s") from exc
+        except requests.RequestException as exc:
+            last_error = exc
+            _write_hermes_debug(debug_dir, label=call_label, attempt=attempt_no, kind="request_error", content=str(exc))
+            if attempt < attempts - 1:
+                retries_used += 1
+                if retry_base_seconds > 0:
+                    time.sleep(retry_base_seconds * (2**attempt))
+                continue
+            _record_llm_metrics(metrics, stage=metric_stage, prompt=prompt, output=output_text, retries=retries_used, parse_errors=parse_errors, started_at=started_at)
+            raise RuntimeError(f"deepseek_request_error:{_safe_debug_label(call_label)}") from exc
+
+        output_text = response.text or ""
+        _write_hermes_debug(debug_dir, label=call_label, attempt=attempt_no, kind="stdout", content=output_text)
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code in DEEPSEEK_RETRYABLE_STATUS_CODES and attempt < attempts - 1:
+            retries_used += 1
+            if retry_base_seconds > 0:
+                time.sleep(retry_base_seconds * (2**attempt))
+            continue
+        if status_code >= 400:
+            _record_llm_metrics(metrics, stage=metric_stage, prompt=prompt, output=output_text, retries=retries_used, parse_errors=parse_errors, started_at=started_at)
+            raise RuntimeError(f"deepseek_http:{status_code}:{_safe_debug_label(call_label)}")
+
+        try:
+            response_payload = response.json()
+            content = response_payload["choices"][0]["message"]["content"]
+            if not _clean_text(content, limit=20):
+                raise ValueError("empty response")
+            payload = _extract_json(str(content))
+            _record_llm_metrics(metrics, stage=metric_stage, prompt=prompt, output=str(content), retries=retries_used, parse_errors=parse_errors, started_at=started_at)
+            return payload
+        except Exception as exc:
+            parse_error = exc
+            parse_errors += 1
+            _write_hermes_debug(debug_dir, label=call_label, attempt=attempt_no, kind="parse_error", content=str(exc))
+            if attempt < attempts - 1:
+                retries_used += 1
+                if retry_base_seconds > 0:
+                    time.sleep(retry_base_seconds * (2**attempt))
+                continue
+
+    _record_llm_metrics(metrics, stage=metric_stage, prompt=prompt, output=output_text, retries=retries_used, parse_errors=parse_errors, started_at=started_at)
+    if parse_error is not None:
+        raise ValueError(f"deepseek_invalid_json:{parse_error}") from parse_error
+    raise RuntimeError(f"deepseek_failed:{last_error}") from last_error
+
+
+def _call_llm_json(
+    prompt: str,
+    *,
+    hermes_command: str,
+    env: dict[str, str],
+    model: str,
+    debug_dir: Path | None,
+    call_label: str,
+    metrics: dict[str, Any] | None,
+    metric_stage: str,
+) -> Any:
+    if _hermes_llm_mode(env) == "api":
+        return _call_deepseek_json(
+            prompt,
+            env=env,
+            model=model,
+            debug_dir=debug_dir,
+            call_label=call_label,
+            metrics=metrics,
+            metric_stage=metric_stage,
+        )
+
+    cli_env = dict(env)
+    cli_env["LLM_MODEL_REPORT"] = model
+    started_at = time.monotonic()
+    try:
+        payload = _call_hermes(prompt, hermes_command=hermes_command, env=cli_env, debug_dir=debug_dir, call_label=call_label)
+        _record_llm_metrics(metrics, stage=metric_stage, prompt=prompt, output=json.dumps(payload, ensure_ascii=False, default=_json_default), retries=0, parse_errors=0, started_at=started_at)
+        return payload
+    except Exception:
+        _record_llm_metrics(metrics, stage=metric_stage, prompt=prompt, output="", retries=0, parse_errors=1, started_at=started_at)
+        raise
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -1274,6 +1670,17 @@ def _write_normalized_comments_jsonl(path: Path, comments: list[dict[str, Any]])
     path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
+def _write_analysis_facts_jsonl(path: Path, facts: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(fact, ensure_ascii=False, default=_json_default) for fact in facts]
+    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+
+def _write_llm_metrics(path: Path, metrics: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
+
+
 def _write_validation(path: Path, *, source: str, degraded: bool) -> None:
     path.write_text(
         json.dumps({"ok": True, "source": source, "degraded": degraded}, ensure_ascii=False, indent=2),
@@ -1413,6 +1820,128 @@ def _run_rule_fallback(
     }
 
 
+def _source_name(env: dict[str, str], *, batch_fallbacks: list[dict[str, Any]], aggregate_local: bool = False) -> str:
+    prefix = "hermes-deepseek-api" if _hermes_llm_mode(env) == "api" else "hermes"
+    if aggregate_local:
+        return f"{prefix}-local-aggregate"
+    if batch_fallbacks:
+        return f"{prefix}-partial-local-batch"
+    return prefix
+
+
+def _comments_by_id(comments: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {_clean_text(comment.get("comment_id"), limit=80): comment for comment in comments if _clean_text(comment.get("comment_id"), limit=80)}
+
+
+def _comments_for_fact_batch(facts: list[dict[str, Any]], comments_by_id: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    comments: list[dict[str, Any]] = []
+    for fact in facts:
+        comment = comments_by_id.get(_clean_text(fact.get("comment_id"), limit=80))
+        if comment:
+            comments.append(comment)
+    return comments
+
+
+def _analyze_fact_batches(
+    *,
+    model_name: str,
+    comments: list[dict[str, Any]],
+    facts: list[dict[str, Any]],
+    active_env: dict[str, str],
+    hermes_command: str,
+    hermes_debug_dir: Path,
+    progress_path: Path,
+    progress_message: str,
+    metrics: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    batch_model, _aggregate_model = _runtime_models(active_env)
+    target_bytes = _int_env(active_env, "HERMES_BATCH_TARGET_BYTES", DEFAULT_BATCH_TARGET_BYTES, minimum=1_000)
+    facts_batches = _batch_items_by_prompt_budget(
+        facts,
+        target_bytes=target_bytes,
+        prompt_builder=lambda index, total, batch: _build_fact_batch_prompt(
+            model_name=model_name,
+            batch_index=index,
+            total_batches=total,
+            facts=batch,
+        ),
+    )
+    if not facts_batches:
+        facts_batches = [[]]
+    total_batches = max(len(facts_batches), 1)
+    metrics["batch_count"] = total_batches
+    metrics["batch_target_bytes"] = target_bytes
+    metrics["batch_prompt_max_bytes"] = max(
+        len(_build_fact_batch_prompt(model_name=model_name, batch_index=index, total_batches=total_batches, facts=batch).encode("utf-8"))
+        for index, batch in enumerate(facts_batches, start=1)
+    )
+    metrics["batch_prompt_total_bytes"] = sum(
+        len(_build_fact_batch_prompt(model_name=model_name, batch_index=index, total_batches=total_batches, facts=batch).encode("utf-8"))
+        for index, batch in enumerate(facts_batches, start=1)
+    )
+    comments_lookup = _comments_by_id(comments)
+    concurrency = min(_int_env(active_env, "HERMES_BATCH_CONCURRENCY", DEFAULT_BATCH_CONCURRENCY), total_batches)
+    metrics["batch_concurrency"] = concurrency
+    batch_payloads: list[dict[str, Any] | None] = [None] * total_batches
+    batch_fallbacks: list[dict[str, Any]] = []
+
+    def run_one(index: int, fact_batch: list[dict[str, Any]]) -> tuple[int, dict[str, Any], dict[str, Any] | None]:
+        prompt = _build_fact_batch_prompt(model_name=model_name, batch_index=index, total_batches=total_batches, facts=fact_batch)
+        try:
+            payload = _call_llm_json(
+                prompt,
+                hermes_command=hermes_command,
+                env=active_env,
+                model=batch_model,
+                debug_dir=hermes_debug_dir,
+                call_label=f"batch_{index:03d}",
+                metrics=metrics,
+                metric_stage="batch",
+            )
+            if not isinstance(payload, dict):
+                raise ValueError("hermes_invalid_json:batch payload is not object")
+            payload.setdefault("batch", f"{index}/{total_batches}")
+            return index, payload, None
+        except Exception as exc:
+            reason = str(exc) or exc.__class__.__name__
+            fallback = {"batch": index, "reason": reason}
+            comment_batch = _comments_for_fact_batch(fact_batch, comments_lookup)
+            payload = _local_batch_payload(batch_index=index, total_batches=total_batches, comments=comment_batch, reason=reason)
+            return index, payload, fallback
+
+    completed_count = 0
+    if concurrency <= 1:
+        for index, fact_batch in enumerate(facts_batches, start=1):
+            _write_progress(progress_path, percent=10 + int(index * 50 / total_batches), message=f"{progress_message} {index}/{total_batches}")
+            result_index, payload, fallback = run_one(index, fact_batch)
+            batch_payloads[result_index - 1] = payload
+            if fallback:
+                batch_fallbacks.append(fallback)
+                _write_progress(progress_path, percent=10 + int(index * 50 / total_batches), message=f"{progress_message} {index}/{total_batches} 失败，使用本地批次兜底")
+    else:
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = {
+                executor.submit(run_one, index, fact_batch): index
+                for index, fact_batch in enumerate(facts_batches, start=1)
+            }
+            for future in as_completed(futures):
+                result_index, payload, fallback = future.result()
+                batch_payloads[result_index - 1] = payload
+                completed_count += 1
+                if fallback:
+                    batch_fallbacks.append(fallback)
+                _write_progress(
+                    progress_path,
+                    percent=10 + int(completed_count * 50 / total_batches),
+                    message=f"{progress_message} {completed_count}/{total_batches}",
+                )
+
+    ordered_payloads = [payload for payload in batch_payloads if isinstance(payload, dict)]
+    batch_fallbacks.sort(key=lambda item: int(item.get("batch") or 0))
+    metrics["fallbacks"]["batch"] = batch_fallbacks
+    return ordered_payloads, batch_fallbacks
+
+
 def generate_outputs(
     *,
     autohome_input: str | Path,
@@ -1441,13 +1970,26 @@ def generate_outputs(
     final_report_path = Path(final_report_output)
     qa_chunks_path = Path(qa_chunks_output)
     normalized_comments_path = final_report_path.parent / "normalized_comments.jsonl"
+    analysis_facts_path = final_report_path.parent / "analysis_facts.jsonl"
+    llm_metrics_path = final_report_path.parent / "llm_metrics.json"
     progress_path = Path(progress_file)
     debug_dir_value = (active_env.get("HERMES_DEBUG_DIR") or "").strip()
     hermes_debug_dir = Path(debug_dir_value) if debug_dir_value else progress_path.parent.parent / "logs" / "hermes"
     _reset_hermes_debug_dir(hermes_debug_dir)
     comments = extract_whitelisted_comments(autohome_input=autohome_path, dcd_input=dcd_path, model_name=model_name)
     _write_normalized_comments_jsonl(normalized_comments_path, comments)
+    analysis_facts = _build_analysis_facts(comments)
+    _write_analysis_facts_jsonl(analysis_facts_path, analysis_facts)
     _write_progress(progress_path, percent=10, message=f"读取脱敏原评论 {len(comments)} 条")
+    batch_model, aggregate_model = _runtime_models(active_env)
+    llm_metrics = _new_llm_metrics(
+        mode=_hermes_llm_mode(active_env),
+        batch_model=batch_model,
+        aggregate_model=aggregate_model,
+        comment_count=len(comments),
+        fact_count=len(analysis_facts),
+    )
+    metrics_started_at = time.monotonic()
 
     fallback_reason = ""
     api_key = (active_env.get("LLM_API_KEY") or active_env.get("DEEPSEEK_API_KEY") or "").strip()
@@ -1456,61 +1998,42 @@ def generate_outputs(
 
     if not fallback_reason:
         try:
-            batch_size = int(active_env.get("HERMES_BATCH_SIZE") or DEFAULT_BATCH_SIZE)
-            batches = _batch_items(comments, batch_size)
-            batch_payloads: list[dict[str, Any]] = []
-            batch_fallbacks: list[dict[str, Any]] = []
-            successful_batch_count = 0
-            total_batches = max(len(batches), 1)
-            for index, batch in enumerate(batches or [[]], start=1):
-                _write_progress(progress_path, percent=10 + int(index * 50 / total_batches), message=f"Hermes 分析批次 {index}/{total_batches}")
-                try:
-                    payload = _call_hermes(
-                        _build_batch_prompt(model_name=model_name, batch_index=index, total_batches=total_batches, comments=batch),
-                        hermes_command=hermes_command,
-                        env=active_env,
-                        debug_dir=hermes_debug_dir,
-                        call_label=f"batch_{index:03d}",
-                    )
-                    if not isinstance(payload, dict):
-                        raise ValueError("hermes_invalid_json:batch payload is not object")
-                    successful_batch_count += 1
-                except Exception as exc:
-                    reason = str(exc) or exc.__class__.__name__
-                    batch_fallbacks.append({"batch": index, "reason": reason})
-                    _write_progress(
-                        progress_path,
-                        percent=10 + int(index * 50 / total_batches),
-                        message=f"Hermes 批次 {index}/{total_batches} 失败，使用本地批次兜底",
-                    )
-                    payload = _local_batch_payload(batch_index=index, total_batches=total_batches, comments=batch, reason=reason)
-                if not isinstance(payload, dict):
-                    raise ValueError("hermes_invalid_json:batch payload is not object")
-                batch_payloads.append(payload)
-            if batch_payloads and successful_batch_count == 0:
-                reason = batch_fallbacks[-1]["reason"] if batch_fallbacks else "hermes_all_batches_failed"
-                raise RuntimeError(reason)
+            batch_payloads, batch_fallbacks = _analyze_fact_batches(
+                model_name=model_name,
+                comments=comments,
+                facts=analysis_facts,
+                active_env=active_env,
+                hermes_command=hermes_command,
+                hermes_debug_dir=hermes_debug_dir,
+                progress_path=progress_path,
+                progress_message="Hermes 分析批次",
+                metrics=llm_metrics,
+            )
 
             _write_progress(progress_path, percent=70, message="Hermes 汇总批次结果")
-            aggregate_source = "hermes-partial-local-batch" if batch_fallbacks else "hermes"
+            aggregate_source = _source_name(active_env, batch_fallbacks=batch_fallbacks)
             aggregate_fallback_reason = ""
             aggregate_env = dict(active_env)
             aggregate_timeout = (active_env.get("HERMES_AGGREGATE_TIMEOUT_SECONDS") or "").strip()
             if aggregate_timeout:
                 aggregate_env["HERMES_TIMEOUT_SECONDS"] = aggregate_timeout
             try:
-                aggregate_payload = _call_hermes(
+                aggregate_payload = _call_llm_json(
                     _build_aggregate_prompt(model_name=model_name, comments=comments, batch_payloads=batch_payloads),
                     hermes_command=hermes_command,
                     env=aggregate_env,
+                    model=aggregate_model,
                     debug_dir=hermes_debug_dir,
                     call_label="aggregate",
+                    metrics=llm_metrics,
+                    metric_stage="aggregate",
                 )
                 if not isinstance(aggregate_payload, dict):
                     raise ValueError("hermes_invalid_json:aggregate payload is not object")
             except Exception as exc:
                 aggregate_fallback_reason = str(exc)
-                aggregate_source = "hermes-local-aggregate"
+                aggregate_source = _source_name(active_env, batch_fallbacks=batch_fallbacks, aggregate_local=True)
+                llm_metrics["fallbacks"]["aggregate"] = aggregate_fallback_reason
                 _write_progress(progress_path, percent=82, message="Hermes 汇总超时，使用批次结果本地归并")
                 aggregate_payload = _local_aggregate_payload(model_name=model_name, comments=comments, batch_payloads=batch_payloads)
 
@@ -1521,6 +2044,9 @@ def generate_outputs(
             _write_report_json(final_report_path, normalized.report)
             _write_qa_chunks(qa_chunks_path, normalized.qa_chunks)
             _write_validation(summary_path.with_suffix(".validation.json"), source=aggregate_source, degraded=False)
+            llm_metrics["source"] = aggregate_source
+            llm_metrics["durations_ms"]["total"] = int((time.monotonic() - metrics_started_at) * 1000)
+            _write_llm_metrics(llm_metrics_path, llm_metrics)
             _write_progress(progress_path, percent=100, message="Hermes 输出已生成")
             result = {
                 "status": "success",
@@ -1531,6 +2057,8 @@ def generate_outputs(
                 "final_report_path": str(final_report_path),
                 "qa_chunks_path": str(qa_chunks_path),
                 "normalized_comments_path": str(normalized_comments_path),
+                "analysis_facts_path": str(analysis_facts_path),
+                "llm_metrics_path": str(llm_metrics_path),
                 "image_paths": image_paths,
                 "postprocess_path": str(postprocess_input or ""),
             }
@@ -1543,6 +2071,10 @@ def generate_outputs(
             fallback_reason = str(exc)
 
     _write_progress(progress_path, percent=75, message="Hermes 不可用，切换到规则兜底", degraded=True)
+    llm_metrics["source"] = "rule-fallback"
+    llm_metrics["fallback_reason"] = fallback_reason
+    llm_metrics["durations_ms"]["total"] = int((time.monotonic() - metrics_started_at) * 1000)
+    _write_llm_metrics(llm_metrics_path, llm_metrics)
     fallback = _run_rule_fallback(
         autohome_input=autohome_path,
         dcd_input=dcd_path,
@@ -1565,6 +2097,8 @@ def generate_outputs(
         "source": "rule-fallback",
         "fallback_reason": fallback_reason,
         "normalized_comments_path": str(normalized_comments_path),
+        "analysis_facts_path": str(analysis_facts_path),
+        "llm_metrics_path": str(llm_metrics_path),
         **fallback,
     }
 
@@ -1604,61 +2138,62 @@ def generate_time_report_outputs(
     final_report_path = output_path / "final_report.json"
     qa_chunks_path = output_path / "qa_chunks.json"
     normalized_comments_path = output_path / "normalized_comments.jsonl"
+    analysis_facts_path = output_path / "analysis_facts.jsonl"
+    llm_metrics_path = output_path / "llm_metrics.json"
     validation_path = summary_path.with_suffix(".validation.json")
     _write_normalized_comments_jsonl(normalized_comments_path, selected_comments)
+    analysis_facts = _build_analysis_facts(selected_comments)
+    _write_analysis_facts_jsonl(analysis_facts_path, analysis_facts)
+    batch_model, aggregate_model = _runtime_models(active_env)
+    llm_metrics = _new_llm_metrics(
+        mode=_hermes_llm_mode(active_env),
+        batch_model=batch_model,
+        aggregate_model=aggregate_model,
+        comment_count=len(selected_comments),
+        fact_count=len(analysis_facts),
+    )
+    metrics_started_at = time.monotonic()
 
     api_key = (active_env.get("LLM_API_KEY") or active_env.get("DEEPSEEK_API_KEY") or "").strip()
     if not api_key:
         raise RuntimeError("hermes_disabled:missing_llm_api_key")
 
-    batch_size = int(active_env.get("HERMES_BATCH_SIZE") or DEFAULT_BATCH_SIZE)
-    batches = _batch_items(selected_comments, batch_size)
-    total_batches = max(len(batches), 1)
-    batch_payloads: list[dict[str, Any]] = []
-    batch_fallbacks: list[dict[str, Any]] = []
-    for index, batch in enumerate(batches or [[]], start=1):
-        _write_progress(progress_path, percent=10 + int(index * 50 / total_batches), message=f"Hermes 分析时间范围批次 {index}/{total_batches}")
-        try:
-            payload = _call_hermes(
-                _build_batch_prompt(model_name=model_name, batch_index=index, total_batches=total_batches, comments=batch),
-                hermes_command=hermes_command,
-                env=active_env,
-                debug_dir=hermes_debug_dir,
-                call_label=f"batch_{index:03d}",
-            )
-        except Exception as exc:
-            reason = str(exc) or exc.__class__.__name__
-            batch_fallbacks.append({"batch": index, "reason": reason})
-            _write_progress(
-                progress_path,
-                percent=10 + int(index * 50 / total_batches),
-                message=f"Hermes 时间范围批次 {index}/{total_batches} 失败，使用本地批次兜底",
-            )
-            payload = _local_batch_payload(batch_index=index, total_batches=total_batches, comments=batch, reason=reason)
-        if not isinstance(payload, dict):
-            raise ValueError("hermes_invalid_json:batch payload is not object")
-        batch_payloads.append(payload)
+    batch_payloads, batch_fallbacks = _analyze_fact_batches(
+        model_name=model_name,
+        comments=selected_comments,
+        facts=analysis_facts,
+        active_env=active_env,
+        hermes_command=hermes_command,
+        hermes_debug_dir=hermes_debug_dir,
+        progress_path=progress_path,
+        progress_message="Hermes 分析时间范围批次",
+        metrics=llm_metrics,
+    )
 
     _write_progress(progress_path, percent=70, message="Hermes 汇总时间范围批次结果")
-    aggregate_source = "hermes-partial-local-batch" if batch_fallbacks else "hermes"
+    aggregate_source = _source_name(active_env, batch_fallbacks=batch_fallbacks)
     aggregate_fallback_reason = ""
     aggregate_env = dict(active_env)
     aggregate_timeout = (active_env.get("HERMES_AGGREGATE_TIMEOUT_SECONDS") or "").strip()
     if aggregate_timeout:
         aggregate_env["HERMES_TIMEOUT_SECONDS"] = aggregate_timeout
     try:
-        aggregate_payload = _call_hermes(
+        aggregate_payload = _call_llm_json(
             _build_aggregate_prompt(model_name=model_name, comments=selected_comments, batch_payloads=batch_payloads),
             hermes_command=hermes_command,
             env=aggregate_env,
+            model=aggregate_model,
             debug_dir=hermes_debug_dir,
             call_label="aggregate",
+            metrics=llm_metrics,
+            metric_stage="aggregate",
         )
         if not isinstance(aggregate_payload, dict):
             raise ValueError("hermes_invalid_json:aggregate payload is not object")
     except Exception as exc:
         aggregate_fallback_reason = str(exc)
-        aggregate_source = "hermes-local-aggregate"
+        aggregate_source = _source_name(active_env, batch_fallbacks=batch_fallbacks, aggregate_local=True)
+        llm_metrics["fallbacks"]["aggregate"] = aggregate_fallback_reason
         _write_progress(progress_path, percent=82, message="Hermes 汇总超时，使用时间范围批次结果本地归并")
         aggregate_payload = _local_aggregate_payload(model_name=model_name, comments=selected_comments, batch_payloads=batch_payloads)
 
@@ -1674,11 +2209,16 @@ def generate_time_report_outputs(
     _write_report_json(final_report_path, normalized.report)
     _write_qa_chunks(qa_chunks_path, normalized.qa_chunks)
     _write_validation(validation_path, source=aggregate_source, degraded=False)
+    llm_metrics["source"] = aggregate_source
+    llm_metrics["durations_ms"]["total"] = int((time.monotonic() - metrics_started_at) * 1000)
+    _write_llm_metrics(llm_metrics_path, llm_metrics)
     _write_progress(progress_path, percent=100, message="时间范围 Hermes 一页纸已生成")
 
     artifact_paths = [
         str(final_report_path),
         str(normalized_comments_path),
+        str(analysis_facts_path),
+        str(llm_metrics_path),
         str(summary_path),
         str(validation_path),
         str(terms_path),
@@ -1696,6 +2236,8 @@ def generate_time_report_outputs(
         "final_report_path": str(final_report_path),
         "qa_chunks_path": str(qa_chunks_path),
         "normalized_comments_path": str(normalized_comments_path),
+        "analysis_facts_path": str(analysis_facts_path),
+        "llm_metrics_path": str(llm_metrics_path),
         "validation_path": str(validation_path),
         "image_paths": image_paths,
         "artifact_paths": artifact_paths,
