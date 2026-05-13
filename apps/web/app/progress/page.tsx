@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { SectionHeader, SignalPanel, StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError } from "@/lib/api";
-import type { JobProgressResponse } from "@/lib/api-types";
+import type { ComparisonProgressResponse, JobProgressResponse } from "@/lib/api-types";
 import { getFlowState, setFlowState } from "@/lib/flow-state";
 
 const terminalStatuses = new Set(["completed", "completed_degraded", "failed", "cancelled", "expired"]);
@@ -19,6 +19,8 @@ const stageLabels: Record<string, string> = {
   rendering_wordcloud: "生成词云",
   generating_ai_report: "生成大模型一页纸",
   building_qa_corpus: "构建问答索引",
+  collecting_models: "补齐车型结果",
+  comparing: "生成竞品对比",
   completed: "已完成",
   completed_degraded: "降级完成",
   failed: "失败",
@@ -36,6 +38,8 @@ const statusLabels: Record<string, string> = {
   failed: "失败",
   completed: "已完成",
   completed_degraded: "降级完成",
+  reused: "复用历史结果",
+  excluded: "已排除",
 };
 
 const pipelineStages = [
@@ -75,13 +79,13 @@ function stageSummary(current: JobProgressResponse | null | undefined, name: str
 }
 
 function statusTone(status: string): "default" | "success" | "warning" | "danger" | "accent" {
-  if (["success", "completed"].includes(status)) {
+  if (["success", "completed", "reused"].includes(status)) {
     return "success";
   }
   if (["retrying", "degraded", "queued", "waiting"].includes(status)) {
     return "warning";
   }
-  if (["failed", "cancelled", "expired"].includes(status)) {
+  if (["failed", "cancelled", "expired", "excluded"].includes(status)) {
     return "danger";
   }
   if (status === "running") {
@@ -94,6 +98,7 @@ export default function ProgressPage() {
   const router = useRouter();
   const [ready, setReady] = useState(false);
   const [progress, setProgress] = useState<JobProgressResponse | null>(null);
+  const [comparisonProgress, setComparisonProgress] = useState<ComparisonProgressResponse | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -106,6 +111,45 @@ export default function ProgressPage() {
     }
 
     const state = getFlowState();
+    if (state.mode === "comparison") {
+      if (!state.accessVersion || !state.comparisonId) {
+        return;
+      }
+
+      let cancelled = false;
+      let intervalId = 0;
+
+      const fetchProgress = async () => {
+        try {
+          const payload = await apiRequest<ComparisonProgressResponse>(`/api/comparisons/${state.comparisonId}/progress`);
+          if (cancelled) {
+            return;
+          }
+          setComparisonProgress(payload);
+          setFlowState({ comparisonProgress: payload });
+          if (terminalStatuses.has(payload.status)) {
+            window.clearInterval(intervalId);
+            router.push("/result");
+          }
+        } catch (err) {
+          if (cancelled) {
+            return;
+          }
+          setError(err instanceof ApiError ? err.message : "无法读取竞品对比进度。");
+        }
+      };
+
+      void fetchProgress();
+      intervalId = window.setInterval(() => {
+        void fetchProgress();
+      }, 2000);
+
+      return () => {
+        cancelled = true;
+        window.clearInterval(intervalId);
+      };
+    }
+
     if (!state.accessVersion || !state.jobId) {
       return;
     }
@@ -156,6 +200,67 @@ export default function ProgressPage() {
   }
 
   const flowState = getFlowState();
+  if (flowState.mode === "comparison") {
+    if (!flowState.accessVersion || !flowState.comparisonId) {
+      return (
+        <main className="panel guard">
+          <p className="eyebrow">第 4 步 / 共 5 步</p>
+          <h2>需要先创建竞品对比任务</h2>
+          <p className="helper">请先在多车型确认页创建任务，再查看进度。</p>
+          <div className="actions">
+            <Link className="button" href="/candidates">
+              返回候选确认
+            </Link>
+          </div>
+        </main>
+      );
+    }
+
+    const currentComparison = comparisonProgress ?? flowState.comparisonProgress;
+    return (
+      <main className="stack-lg">
+        <SignalPanel tone="accent" className="stack-lg">
+          <SectionHeader
+            eyebrow="第 4 步 / 竞品对比"
+            title="多车型对比进度"
+            copy="系统会先复用或补齐各车型 JSON 结果，再生成竞品对比汇总。"
+          />
+          {error ? <p className="error">{error}</p> : null}
+          <div className="stack">
+            <div className="bar" aria-hidden="true">
+              <span style={{ width: `${currentComparison?.overall_percent ?? 0}%` }} />
+            </div>
+            <div className="meta-row">
+              <StatusPill tone={statusTone(currentComparison?.status ?? "waiting")}>
+                {currentComparison ? `${currentComparison.overall_percent}%` : "等待进度"}
+              </StatusPill>
+              <StatusPill tone="warning">{currentComparison?.eta_label ?? "预计剩余时间计算中"}</StatusPill>
+              <StatusPill tone="accent">
+                {currentComparison ? labelFor(currentComparison.current_stage, stageLabels) : "等待第一条进度"}
+              </StatusPill>
+            </div>
+            <p className="status-copy">{currentComparison?.message || "竞品对比进度会显示在这里。"}</p>
+          </div>
+        </SignalPanel>
+
+        <div className="pipeline-strip">
+          {(currentComparison?.vehicles ?? []).map((vehicle, index) => (
+            <div key={`${vehicle.query}-${index}`} className="pipeline-node">
+              <strong>{vehicle.model_name || vehicle.query}</strong>
+              <StatusPill tone={statusTone(vehicle.status)}>{labelFor(vehicle.status, statusLabels)}</StatusPill>
+              <p className="field-hint" style={{ marginTop: 10 }}>
+                {vehicle.eta_label}
+              </p>
+              {vehicle.source_job_id ? <p className="field-hint">复用：{vehicle.source_job_id}</p> : null}
+              {vehicle.child_job_id ? <p className="field-hint">采集：{vehicle.child_job_id}</p> : null}
+              {vehicle.error_message ? <p className="error">{vehicle.error_message}</p> : null}
+            </div>
+          ))}
+        </div>
+      </main>
+    );
+  }
+
   if (!flowState.accessVersion || !flowState.jobId) {
     return (
       <main className="panel guard">
@@ -202,6 +307,7 @@ export default function ProgressPage() {
             <StatusPill tone="accent">
               {current ? labelFor(current.current_stage, stageLabels) : "等待第一条进度"}
             </StatusPill>
+            <StatusPill tone="warning">{current?.eta_label ?? "预计剩余时间计算中"}</StatusPill>
           </div>
           <p className="status-copy">{current?.message || "后端进度会显示在这里。"}</p>
         </div>

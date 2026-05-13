@@ -19,6 +19,10 @@ def new_time_report_id() -> str:
     return f"time_report_{utc_now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
 
 
+def new_comparison_id() -> str:
+    return f"cmp_{utc_now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -168,3 +172,61 @@ class VehicleResolveCache(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ComparisonJob(Base):
+    __tablename__ = "comparison_jobs"
+
+    comparison_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_comparison_id)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
+    current_stage: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
+    degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    vehicle_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    passphrase_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    queue_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    start_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    end_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    report_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    vehicles: Mapped[list["ComparisonVehicle"]] = relationship(back_populates="comparison", cascade="all, delete-orphan")
+    artifacts: Mapped[list["ComparisonArtifact"]] = relationship(back_populates="comparison", cascade="all, delete-orphan")
+
+
+class ComparisonVehicle(Base):
+    __tablename__ = "comparison_vehicles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    comparison_id: Mapped[str] = mapped_column(ForeignKey("comparison_jobs.comparison_id", ondelete="CASCADE"), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    query: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
+    source_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    child_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    selected_candidates: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    comparison: Mapped[ComparisonJob] = relationship(back_populates="vehicles")
+
+
+class ComparisonArtifact(Base):
+    __tablename__ = "comparison_artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    comparison_id: Mapped[str] = mapped_column(ForeignKey("comparison_jobs.comparison_id", ondelete="CASCADE"), nullable=False)
+    artifact_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_path: Mapped[str] = mapped_column(Text, nullable=False)
+    artifact_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    comparison: Mapped[ComparisonJob] = relationship(back_populates="artifacts")

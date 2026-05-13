@@ -54,6 +54,10 @@ export type JobProgressResponse = {
   overall_percent: number;
   stages: StageStatusItem[];
   message: string;
+  estimated_remaining_seconds: number | null;
+  estimated_remaining_minutes: number | null;
+  eta_label: string;
+  eta_confidence: string;
 };
 
 export type SampleSummary = {
@@ -97,6 +101,76 @@ export type ArtifactItem = {
   path: string;
   url: string;
   source_stage: string | null;
+};
+
+export type ReusableJobOption = {
+  job_id: string;
+  model_name: string;
+  finished_at: string | null;
+  source: string;
+};
+
+export type ComparisonVehicleOption = {
+  query: string;
+  resolve: VehicleResolveResponse;
+  reuse_options: ReusableJobOption[];
+};
+
+export type ComparisonOptionsResponse = {
+  vehicles: ComparisonVehicleOption[];
+};
+
+export type ComparisonVehicleInput = {
+  query: string;
+  model_name?: string | null;
+  selected_candidates: SelectedCandidates;
+  reuse_job_id?: string | null;
+};
+
+export type ComparisonCreateResponse = {
+  comparison_id: string;
+  status: string;
+  current_stage: string;
+  progress_url: string;
+  result_url: string;
+};
+
+export type ComparisonVehicleProgress = {
+  query: string;
+  model_name: string;
+  status: string;
+  source_job_id: string | null;
+  child_job_id: string | null;
+  estimated_remaining_seconds: number | null;
+  estimated_remaining_minutes: number | null;
+  eta_label: string;
+  eta_confidence: string;
+  error_message: string | null;
+};
+
+export type ComparisonProgressResponse = {
+  comparison_id: string;
+  status: string;
+  current_stage: string;
+  degraded: boolean;
+  overall_percent: number;
+  estimated_remaining_seconds: number | null;
+  estimated_remaining_minutes: number | null;
+  eta_label: string;
+  eta_confidence: string;
+  vehicles: ComparisonVehicleProgress[];
+  message: string;
+};
+
+export type ComparisonResultResponse = {
+  comparison_id: string;
+  status: string;
+  degraded: boolean;
+  retention_days: number;
+  vehicle_count: number;
+  report_json: Record<string, unknown>;
+  artifacts: ArtifactItem[];
+  zip_url: string;
 };
 
 export type JobResultResponse = {

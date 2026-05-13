@@ -128,6 +128,41 @@ def cleanup_expired_job_data(
                     ),
                     {"job_id": job_id},
                 )
+
+            if "comparison_jobs" in existing_table_names:
+                comparison_rows = conn.execute(
+                    text(
+                        """
+                        SELECT comparison_id, created_at, finished_at
+                        FROM comparison_jobs
+                        WHERE status IN :statuses
+                        ORDER BY COALESCE(finished_at, created_at), comparison_id
+                        """
+                    ).bindparams(bindparam("statuses", expanding=True)),
+                    {"statuses": TERMINAL_CLEANUP_STATUSES},
+                ).mappings().all()
+                for row in comparison_rows:
+                    finished_or_created = _as_utc_datetime(row["finished_at"]) or _as_utc_datetime(row["created_at"])
+                    if finished_or_created is None or finished_or_created > cutoff:
+                        continue
+                    comparison_id = str(row["comparison_id"])
+                    _remove_job_dir(artifact_root, comparison_id)
+                    if "comparison_artifacts" in existing_table_names:
+                        conn.execute(
+                            text("DELETE FROM comparison_artifacts WHERE comparison_id = :comparison_id"),
+                            {"comparison_id": comparison_id},
+                        )
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE comparison_jobs
+                            SET status = 'expired',
+                                current_stage = 'expired'
+                            WHERE comparison_id = :comparison_id
+                            """
+                        ),
+                        {"comparison_id": comparison_id},
+                    )
     finally:
         engine.dispose()
 

@@ -15,6 +15,8 @@ const stageLabels: Record<string, string> = {
   rendering_wordcloud: "词云生成",
   generating_ai_report: "AI 一页纸",
   building_qa_corpus: "问答索引",
+  collecting_models: "补齐车型",
+  comparing: "竞品对比",
   completed: "已完成",
   completed_degraded: "降级完成",
   failed: "失败",
@@ -24,11 +26,16 @@ const stageLabels: Record<string, string> = {
 
 const emptyFlowState: FlowState = {
   accessVersion: null,
+  mode: null,
   vehicleQuery: null,
   vehicleResolve: null,
   selectedCandidates: null,
   jobId: null,
   jobProgress: null,
+  comparisonId: null,
+  comparisonOptions: null,
+  comparisonVehicles: null,
+  comparisonProgress: null,
 };
 
 function shortJobId(jobId: string | null) {
@@ -39,11 +46,22 @@ function shortJobId(jobId: string | null) {
 }
 
 function currentStageLabel(state: FlowState) {
+  if (state.mode === "comparison") {
+    const comparisonStage = state.comparisonProgress?.current_stage;
+    if (!comparisonStage) {
+      return state.comparisonId ? "等待对比进度" : "未启动";
+    }
+    return stageLabels[comparisonStage] ?? comparisonStage;
+  }
   const stage = state.jobProgress?.current_stage;
   if (!stage) {
     return state.jobId ? "等待进度" : "未启动";
   }
   return stageLabels[stage] ?? stage;
+}
+
+function activeTaskId(state: FlowState) {
+  return state.mode === "comparison" ? state.comparisonId : state.jobId;
 }
 
 export function AppChrome({ children }: { children: ReactNode }) {
@@ -77,11 +95,11 @@ export function AppChrome({ children }: { children: ReactNode }) {
         <div className="mission-status" aria-label="当前任务状态">
           <div>
             <span>车型</span>
-            <strong>{flowState.vehicleQuery || "待输入"}</strong>
+            <strong>{flowState.mode === "comparison" ? `${flowState.comparisonVehicles?.length ?? 0} 车对比` : flowState.vehicleQuery || "待输入"}</strong>
           </div>
           <div>
             <span>任务</span>
-            <strong>{shortJobId(flowState.jobId)}</strong>
+            <strong>{shortJobId(activeTaskId(flowState))}</strong>
           </div>
           <div>
             <span>阶段</span>

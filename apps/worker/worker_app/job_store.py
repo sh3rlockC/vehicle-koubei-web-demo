@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import json
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import JSON as SAJSON
 from sqlalchemy import bindparam, create_engine, text
@@ -14,6 +16,10 @@ def utc_now() -> datetime:
 
 def utc_now_iso() -> str:
     return utc_now().isoformat()
+
+
+def new_worker_job_id() -> str:
+    return f"job_{utc_now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
 
 
 def _as_datetime(value: datetime | str | None) -> datetime | None:
@@ -50,6 +56,27 @@ class TimeReportInputs:
     model_name: str
     start_date: str
     end_date: str
+
+
+@dataclass(frozen=True)
+class ComparisonVehicleInputs:
+    id: int
+    position: int
+    query: str
+    model_name: str
+    status: str
+    source_job_id: str | None
+    child_job_id: str | None
+    selected_candidates: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ComparisonInputs:
+    comparison_id: str
+    start_date: str | None
+    end_date: str | None
+    passphrase_version: str
+    vehicles: list[ComparisonVehicleInputs]
 
 
 class DatabaseJobStore:
@@ -100,6 +127,285 @@ class DatabaseJobStore:
             start_date=str(row["start_date"]),
             end_date=str(row["end_date"]),
         )
+
+    def fetch_comparison_inputs(self, comparison_id: str) -> ComparisonInputs:
+        query = text(
+            """
+            SELECT c.comparison_id, c.start_date, c.end_date, c.passphrase_version,
+                   v.id, v.position, v.query, v.model_name, v.status,
+                   v.source_job_id, v.child_job_id, v.selected_candidates
+            FROM comparison_jobs c
+            JOIN comparison_vehicles v ON v.comparison_id = c.comparison_id
+            WHERE c.comparison_id = :comparison_id
+            ORDER BY v.position ASC, v.id ASC
+            """
+        )
+        with self.engine.begin() as conn:
+            rows = conn.execute(query, {"comparison_id": comparison_id}).mappings().all()
+        if not rows:
+            raise RuntimeError(f"comparison not found: {comparison_id}")
+
+        vehicles = []
+        for row in rows:
+            selected_candidates = row["selected_candidates"] or {}
+            if isinstance(selected_candidates, str):
+                selected_candidates = json.loads(selected_candidates)
+            vehicles.append(
+                ComparisonVehicleInputs(
+                    id=int(row["id"]),
+                    position=int(row["position"] or 0),
+                    query=str(row["query"]),
+                    model_name=str(row["model_name"]),
+                    status=str(row["status"]),
+                    source_job_id=str(row["source_job_id"]) if row["source_job_id"] else None,
+                    child_job_id=str(row["child_job_id"]) if row["child_job_id"] else None,
+                    selected_candidates=dict(selected_candidates),
+                )
+            )
+        first = rows[0]
+        return ComparisonInputs(
+            comparison_id=str(first["comparison_id"]),
+            start_date=str(first["start_date"]) if first["start_date"] else None,
+            end_date=str(first["end_date"]) if first["end_date"] else None,
+            passphrase_version=str(first["passphrase_version"]),
+            vehicles=vehicles,
+        )
+
+    def mark_comparison_running(self, comparison_id: str) -> None:
+        now = utc_now_iso()
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE comparison_jobs
+                    SET status = 'running',
+                        current_stage = 'collecting_models',
+                        started_at = COALESCE(started_at, :started_at),
+                        error_code = NULL,
+                        error_message = NULL
+                    WHERE comparison_id = :comparison_id
+                    """
+                ),
+                {"comparison_id": comparison_id, "started_at": now},
+            )
+
+    def mark_comparison_comparing(self, comparison_id: str) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE comparison_jobs
+                    SET status = 'running',
+                        current_stage = 'comparing'
+                    WHERE comparison_id = :comparison_id
+                    """
+                ),
+                {"comparison_id": comparison_id},
+            )
+
+    def mark_comparison_vehicle_status(
+        self,
+        vehicle_id: int,
+        *,
+        status: str,
+        source_job_id: str | None = None,
+        child_job_id: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        now = utc_now_iso()
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE comparison_vehicles
+                    SET status = :status,
+                        source_job_id = COALESCE(:source_job_id, source_job_id),
+                        child_job_id = COALESCE(:child_job_id, child_job_id),
+                        error_code = :error_code,
+                        error_message = :error_message,
+                        updated_at = :updated_at
+                    WHERE id = :vehicle_id
+                    """
+                ),
+                {
+                    "vehicle_id": vehicle_id,
+                    "status": status,
+                    "source_job_id": source_job_id,
+                    "child_job_id": child_job_id,
+                    "error_code": error_code,
+                    "error_message": error_message,
+                    "updated_at": now,
+                },
+            )
+
+    def ensure_comparison_child_job(self, vehicle: ComparisonVehicleInputs, *, passphrase_version: str) -> str:
+        if vehicle.child_job_id:
+            return vehicle.child_job_id
+        now = utc_now_iso()
+        job_id = new_worker_job_id()
+        autohome = dict(vehicle.selected_candidates.get("autohome") or {})
+        dongchedi = dict(vehicle.selected_candidates.get("dongchedi") or {})
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO jobs (
+                        job_id, query, model_name, status, current_stage, degraded,
+                        passphrase_version, queue_job_id, created_at, enqueued_at, started_at, finished_at
+                    ) VALUES (
+                        :job_id, :query, :model_name, 'queued', 'queued', :degraded,
+                        :passphrase_version, NULL, :created_at, :enqueued_at, NULL, NULL
+                    )
+                    """
+                ),
+                {
+                    "job_id": job_id,
+                    "query": vehicle.query,
+                    "model_name": vehicle.model_name,
+                    "degraded": _db_bool(False),
+                    "passphrase_version": passphrase_version,
+                    "created_at": now,
+                    "enqueued_at": now,
+                },
+            )
+            for platform, candidate in (("autohome", autohome), ("dongchedi", dongchedi)):
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO job_candidates (job_id, platform, series_id, url, title, source, selected)
+                        VALUES (:job_id, :platform, :series_id, :url, :title, :source, :selected)
+                        """
+                    ),
+                    {
+                        "job_id": job_id,
+                        "platform": platform,
+                        "series_id": str(candidate.get("series_id") or ""),
+                        "url": candidate.get("url"),
+                        "title": candidate.get("title") or vehicle.model_name,
+                        "source": candidate.get("source"),
+                        "selected": _db_bool(True),
+                    },
+                )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO job_stage_runs (
+                        job_id, stage_name, attempt_no, status, started_at, ended_at, duration_ms, error_code, error_message
+                    ) VALUES (
+                        :job_id, 'queued', 1, 'queued', :started_at, NULL, NULL, NULL, NULL
+                    )
+                    """
+                ),
+                {"job_id": job_id, "started_at": now},
+            )
+            conn.execute(
+                text(
+                    """
+                    UPDATE comparison_vehicles
+                    SET child_job_id = :child_job_id,
+                        status = 'running',
+                        updated_at = :updated_at
+                    WHERE id = :vehicle_id
+                    """
+                ),
+                {"vehicle_id": vehicle.id, "child_job_id": job_id, "updated_at": now},
+            )
+        return job_id
+
+    def comparison_source_artifacts(self, job_id: str) -> dict[str, str]:
+        query = text(
+            """
+            SELECT artifact_path
+            FROM job_artifacts
+            WHERE job_id = :job_id
+            ORDER BY id ASC
+            """
+        )
+        artifacts: dict[str, str] = {}
+        with self.engine.begin() as conn:
+            rows = conn.execute(query, {"job_id": job_id}).mappings().all()
+        for row in rows:
+            path = str(row["artifact_path"])
+            for suffix in ("final_report.json", "analysis_facts.jsonl", "llm_metrics.json"):
+                if path.endswith(suffix):
+                    artifacts[suffix] = path
+        return artifacts
+
+    def mark_comparison_completed(
+        self,
+        comparison_id: str,
+        *,
+        report_json: dict[str, Any],
+        artifact_paths: list[str],
+        degraded: bool,
+    ) -> None:
+        now = utc_now_iso()
+        status = "completed_degraded" if degraded else "completed"
+        statement = text(
+            """
+            UPDATE comparison_jobs
+            SET status = :status,
+                current_stage = :status,
+                degraded = :degraded,
+                report_json = :report_json,
+                error_code = NULL,
+                error_message = NULL,
+                finished_at = :finished_at
+            WHERE comparison_id = :comparison_id
+            """
+        ).bindparams(bindparam("report_json", type_=SAJSON))
+        with self.engine.begin() as conn:
+            conn.execute(
+                statement,
+                {
+                    "comparison_id": comparison_id,
+                    "status": status,
+                    "degraded": _db_bool(degraded),
+                    "report_json": report_json,
+                    "finished_at": now,
+                },
+            )
+            conn.execute(text("DELETE FROM comparison_artifacts WHERE comparison_id = :comparison_id"), {"comparison_id": comparison_id})
+            for artifact_path in artifact_paths:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO comparison_artifacts (comparison_id, artifact_type, artifact_path, artifact_url, source_stage, created_at)
+                        VALUES (:comparison_id, :artifact_type, :artifact_path, NULL, :source_stage, :created_at)
+                        """
+                    ),
+                    {
+                        "comparison_id": comparison_id,
+                        "artifact_type": self._infer_comparison_artifact_type(artifact_path),
+                        "artifact_path": artifact_path,
+                        "source_stage": "snapshot" if ".final_report." in artifact_path or ".analysis_facts." in artifact_path else "comparison",
+                        "created_at": now,
+                    },
+                )
+
+    def mark_comparison_failed(self, comparison_id: str, *, error_code: str, error_message: str) -> None:
+        now = utc_now_iso()
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE comparison_jobs
+                    SET status = 'failed',
+                        current_stage = 'failed',
+                        error_code = :error_code,
+                        error_message = :error_message,
+                        finished_at = :finished_at
+                    WHERE comparison_id = :comparison_id
+                    """
+                ),
+                {
+                    "comparison_id": comparison_id,
+                    "error_code": error_code,
+                    "error_message": error_message,
+                    "finished_at": now,
+                },
+            )
 
     def mark_time_report_running(self, report_id: str) -> None:
         now = utc_now_iso()
@@ -490,3 +796,18 @@ class DatabaseJobStore:
         if path.endswith(".json"):
             return "json"
         return "file"
+
+    def _infer_comparison_artifact_type(self, artifact_path: str) -> str:
+        path = artifact_path.lower()
+        name = path.rsplit("/", 1)[-1]
+        if name == "final_comparison.json":
+            return "comparison_json"
+        if name == "comparison_summary.xlsx":
+            return "comparison_excel"
+        if name.endswith(".analysis_facts.jsonl"):
+            return "source_analysis_facts_jsonl"
+        if name.endswith(".final_report.json"):
+            return "source_final_report_json"
+        if name == "llm_metrics.json" or name.endswith(".llm_metrics.json"):
+            return "llm_metrics_json"
+        return self._infer_artifact_type(artifact_path)
