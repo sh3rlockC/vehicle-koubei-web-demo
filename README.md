@@ -76,30 +76,6 @@ codexwork/
   koubei-wordcloud/
 ```
 
-## 本地启动
-
-```bash
-cd /Users/xyc/Documents/codexwork/vehicle-koubei-web-demo
-cp .env.example .env
-docker compose up --build
-```
-
-访问：
-
-```text
-http://127.0.0.1/passphrase
-```
-
-`.env.example` 仅用于本地开发示例。生产部署前必须重新设置：
-
-- `PASS_PHRASE_HASH`
-- `PASS_PHRASE_VERSION`
-- `SESSION_SECRET`
-- `POSTGRES_PASSWORD`
-- `DATABASE_URL`
-- `TAVILY_API_KEY`
-- `LLM_API_KEY`
-- OpenClaw gateway token 和模型配置
 
 ## 云端部署
 
@@ -111,10 +87,7 @@ http://127.0.0.1/passphrase
 - Docker Compose 部署 Web/API/Worker/Postgres/Redis/Nginx。
 - OpenClaw 以宿主机 systemd 服务运行，默认不暴露公网端口。
 
-详细步骤见：
 
-- [`docs/cloud-deployment.md`](docs/cloud-deployment.md)
-- [`docs/project-handoff-checklist.md`](docs/project-handoff-checklist.md)
 
 ## OpenClaw Agent 流程
 
@@ -134,33 +107,3 @@ Worker 仍是唯一总编排层，负责：
 - 日志记录
 - 产物校验
 - 降级策略
-
-详细说明见：
-
-- [`docs/openclaw-skill-flow.md`](docs/openclaw-skill-flow.md)
-
-## 当前已知限制
-
-- 车型识别会优先复用服务器已确认车系 ID；如果误确认过错误 ID，仍需通过手动填写校正。
-- 服务器默认每 12 小时清理一次超过 3 天的任务评论产物，worker 启动后会先扫描一次，结果页会提示用户及时下载 ZIP。
-- OpenClaw task `succeeded` 不等于业务采集成功，必须校验 Excel、validation JSON 和 progress JSON。
-- 单平台降级结果页和词云兼容仍需继续增强。
-- 多人并发时建议增加 agent pool、任务排队提示和产物清理策略。
-
-## 排查文档
-
-新对话或新模型接手时，优先阅读：
-
-- [`docs/project-handoff-checklist.md`](docs/project-handoff-checklist.md)
-- [`docs/project-0-to-1-retrospective.md`](docs/project-0-to-1-retrospective.md)
-- [`docs/next-session-brief.md`](docs/next-session-brief.md)
-- [`docs/worktree-workflow.md`](docs/worktree-workflow.md)
-
-推荐把本仓库主目录作为长期稳定工作树，新增功能通过 sibling Git worktree 开发，避免单个对话上下文过重或污染主工作树。
-
-## 安全说明
-
-- 不要提交 `.env`、API Key、OpenClaw token、数据库密码或真实业务产物。
-- 公开仓库前应检查 Git 历史中是否存在真实密钥。
-- 生产环境应使用强随机 `SESSION_SECRET` 和独立数据库密码。
-- OpenClaw gateway 建议只允许本机或内网访问，不直接暴露公网。
