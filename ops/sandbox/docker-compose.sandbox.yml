@@ -1,0 +1,22 @@
+services:
+  nginx:
+    ports:
+      - "${HTTP_PORT:-18080}:80"
+
+  api:
+    environment:
+      APP_ENV: sandbox
+      BASE_URL: ${BASE_URL:-http://localhost:18080}
+      COMPARISON_MODEL_CONCURRENCY: ${COMPARISON_MODEL_CONCURRENCY:-1}
+
+  worker:
+    environment:
+      APP_ENV: sandbox
+      WORKER_QUEUE_NAME: ${WORKER_QUEUE_NAME:-vehicle-koubei-sandbox}
+      COMPARISON_MODEL_CONCURRENCY: ${COMPARISON_MODEL_CONCURRENCY:-1}
+
+volumes:
+  postgres_data:
+    name: vehicle-koubei-sandbox-postgres
+  redis_data:
+    name: vehicle-koubei-sandbox-redis

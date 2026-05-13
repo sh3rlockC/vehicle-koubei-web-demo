@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { SignalPanel, StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError, toJsonBody } from "@/lib/api";
 import type {
+  ComparisonResultResponse,
   CreateTimeReportRequest,
   JobCommentPageResponse,
   JobCommentSummaryResponse,
@@ -161,6 +162,7 @@ export default function ResultPage() {
   const flowState = getFlowState();
   const [ready, setReady] = useState(false);
   const [result, setResult] = useState<JobResultResponse | null>(null);
+  const [comparisonResult, setComparisonResult] = useState<ComparisonResultResponse | null>(null);
   const [error, setError] = useState("");
   const [qaQuestion, setQaQuestion] = useState("");
   const [qaResult, setQaResult] = useState<QaResponse | null>(null);
@@ -184,6 +186,48 @@ export default function ResultPage() {
   useEffect(() => {
     if (!ready) {
       return;
+    }
+
+    if (flowState.mode === "comparison") {
+      if (!flowState.accessVersion || !flowState.comparisonId) {
+        return;
+      }
+
+      let cancelled = false;
+      const loadComparisonResult = async () => {
+        try {
+          const payload = await apiRequest<ComparisonResultResponse>(`/api/comparisons/${flowState.comparisonId}`);
+          if (cancelled) {
+            return;
+          }
+          setComparisonResult(payload);
+          setFlowState({
+            comparisonId: payload.comparison_id,
+            comparisonProgress: {
+              comparison_id: payload.comparison_id,
+              status: payload.status,
+              current_stage: payload.status,
+              degraded: payload.degraded,
+              overall_percent: 100,
+              estimated_remaining_seconds: 0,
+              estimated_remaining_minutes: 0,
+              eta_label: "预计剩余 0 分钟",
+              eta_confidence: "done",
+              vehicles: [],
+              message: labelFor(payload.status, statusLabels),
+            },
+          });
+        } catch (err) {
+          if (!cancelled) {
+            setError(err instanceof ApiError ? err.message : "无法读取竞品对比结果。");
+          }
+        }
+      };
+
+      void loadComparisonResult();
+      return () => {
+        cancelled = true;
+      };
     }
 
     if (!flowState.accessVersion || !flowState.jobId) {
@@ -210,6 +254,10 @@ export default function ResultPage() {
             overall_percent: 100,
             stages: [],
             message: labelFor(payload.status, statusLabels),
+            estimated_remaining_seconds: 0,
+            estimated_remaining_minutes: 0,
+            eta_label: "预计剩余 0 分钟",
+            eta_confidence: "done",
           },
         });
       } catch (err) {
@@ -230,7 +278,7 @@ export default function ResultPage() {
     return () => {
       cancelled = true;
     };
-  }, [flowState.accessVersion, flowState.jobId, ready]);
+  }, [flowState.accessVersion, flowState.comparisonId, flowState.jobId, flowState.mode, ready]);
 
   useEffect(() => {
     if (!ready || !flowState.accessVersion || !flowState.jobId || !result || result.status === "expired") {
@@ -401,6 +449,94 @@ export default function ResultPage() {
 
   if (!ready) {
     return <main className="panel guard">正在加载...</main>;
+  }
+
+  if (flowState.mode === "comparison") {
+    if (!flowState.accessVersion || !flowState.comparisonId) {
+      return (
+        <main className="panel guard">
+          <p className="eyebrow">第 5 步 / 共 5 步</p>
+          <h2>需要先创建竞品对比任务</h2>
+          <p className="helper">请先创建并完成竞品对比任务，再查看结果页。</p>
+          <div className="actions">
+            <Link className="button" href="/vehicle">
+              重新开始
+            </Link>
+          </div>
+        </main>
+      );
+    }
+
+    const comparison = comparisonResult;
+    const vehicles = Array.isArray(comparison?.report_json?.vehicles) ? comparison.report_json.vehicles : [];
+    const headline = asText(comparison?.report_json?.headline, "竞品口碑对比");
+    const summary = asText((comparison?.report_json?.comparison as Record<string, unknown> | undefined)?.summary, "对比结果生成后会显示在这里。");
+
+    return (
+      <main className="stack-lg">
+        <SignalPanel tone="accent" className="stack-lg">
+          <div className="meta-row">
+            <StatusPill tone={comparison?.status === "completed" ? "success" : comparison?.status === "failed" ? "danger" : "warning"}>
+              {comparison ? labelFor(comparison.status, statusLabels) : "读取中"}
+            </StatusPill>
+            <StatusPill tone={comparison?.degraded ? "warning" : "success"}>{comparison?.degraded ? "降级完成" : "完整结果"}</StatusPill>
+          </div>
+          <div>
+            <p className="eyebrow">COMPETITOR COMPARISON</p>
+            <h2>{headline}</h2>
+            <p className="helper">{summary}</p>
+          </div>
+          {error ? <p className="error">{error}</p> : null}
+        </SignalPanel>
+
+        <div className="pipeline-strip">
+          {vehicles.map((vehicle, index) => {
+            const item = vehicle as Record<string, unknown>;
+            return (
+              <div className="pipeline-node" key={`${asText(item.model_name, "车型")}-${index}`}>
+                <strong>{asText(item.model_name, `车型 ${index + 1}`)}</strong>
+                <StatusPill tone="accent">{asText(item.comment_fact_count, "0")} 条事实</StatusPill>
+                <p className="field-hint" style={{ marginTop: 10 }}>
+                  {asText(item.headline, "暂无摘要")}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="card">
+          <h3>结果文件</h3>
+          <div className="artifact-grid">
+            {(comparison?.artifacts ?? []).map((artifact) => (
+              <a key={artifact.id} className="artifact-card" href={artifact.url}>
+                <strong>{artifact.path.split("/").pop()}</strong>
+                <span>{artifact.type}</span>
+              </a>
+            ))}
+          </div>
+          <div className="actions" style={{ marginTop: 18 }}>
+            {comparison ? (
+              <a className="button" href={comparison.zip_url}>
+                下载对比 ZIP
+              </a>
+            ) : null}
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => {
+                clearFlowState();
+                window.location.href = "/passphrase";
+              }}
+            >
+              重新开始
+            </button>
+          </div>
+          <p className="field-hint" style={{ marginTop: 12 }}>
+            完整 JSON、每车脱敏 JSON 快照和 metrics 保留 {comparison?.retention_days ?? 3} 天。
+          </p>
+        </div>
+      </main>
+    );
   }
 
   if (!flowState.accessVersion || !flowState.jobId) {

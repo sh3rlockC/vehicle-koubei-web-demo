@@ -40,6 +40,7 @@ from app.services.comment_time_reports import (
     time_report_payload,
 )
 from app.services.confirmed_vehicle_series import upsert_confirmed_vehicle_series
+from app.services.eta import estimate_job_progress_eta
 from app.services.job_queue import get_job_queue
 from app.services.keyword_rank_images import build_keyword_rank_pngs
 from app.services.passphrase import require_passphrase_session
@@ -297,6 +298,7 @@ def get_job_progress(
         "failed": "任务执行失败",
         "expired": "任务结果已过期，请重新创建任务",
     }.get(job.current_stage, f"当前阶段：{job.current_stage}")
+    eta = estimate_job_progress_eta(db, job, stages)
 
     return JobProgressResponse(
         job_id=job.job_id,
@@ -306,6 +308,7 @@ def get_job_progress(
         overall_percent=overall_percent,
         stages=stages,
         message=message,
+        **eta.as_dict(),
     )
 
 

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 
 from worker_app.artifacts import ensure_job_dirs
+from worker_app.comparison_outputs import VehicleSnapshot, generate_comparison_outputs
 from worker_app.hermes_outputs import generate_time_report_outputs
-from worker_app.job_store import DatabaseJobStore
+from worker_app.job_store import ComparisonVehicleInputs, DatabaseJobStore
 from worker_app.jobs import JobContext, run_pipeline
 from worker_app.openclaw_runner import build_stage_runner
 from worker_app.stages import build_stage_commands
@@ -23,6 +25,51 @@ def _error_code_from_exception(exc: Exception) -> str:
     if not message:
         return exc.__class__.__name__
     return message.split(":", 1)[0]
+
+
+def _safe_filename_part(value: str) -> str:
+    cleaned = "".join(char if char not in {'/', '\\', ':', '*', '?', '"', '<', '>', '|'} else "_" for char in value.strip())
+    return cleaned or "vehicle"
+
+
+def _copy_snapshot_artifacts(
+    *,
+    vehicle: ComparisonVehicleInputs,
+    source_job_id: str,
+    source_artifacts: dict[str, str],
+    output_dir: Path,
+) -> tuple[VehicleSnapshot, list[str]]:
+    final_report = Path(source_artifacts["final_report.json"])
+    analysis_facts = Path(source_artifacts["analysis_facts.jsonl"])
+    llm_metrics_value = source_artifacts.get("llm_metrics.json")
+    if not final_report.exists() or not analysis_facts.exists():
+        raise RuntimeError(f"source job missing comparison JSON artifacts: {source_job_id}")
+
+    prefix = _safe_filename_part(vehicle.model_name)
+    final_target = output_dir / f"{prefix}.final_report.json"
+    facts_target = output_dir / f"{prefix}.analysis_facts.jsonl"
+    shutil.copy2(final_report, final_target)
+    shutil.copy2(analysis_facts, facts_target)
+
+    copied = [str(final_target), str(facts_target)]
+    metrics_target = None
+    if llm_metrics_value:
+        metrics_source = Path(llm_metrics_value)
+        if metrics_source.exists():
+            metrics_target = output_dir / f"{prefix}.llm_metrics.json"
+            shutil.copy2(metrics_source, metrics_target)
+            copied.append(str(metrics_target))
+
+    return (
+        VehicleSnapshot(
+            model_name=vehicle.model_name,
+            source_job_id=source_job_id,
+            final_report_path=final_target,
+            analysis_facts_path=facts_target,
+            llm_metrics_path=metrics_target,
+        ),
+        copied,
+    )
 
 
 def run_job(
@@ -122,4 +169,103 @@ def run_time_report(
         "status": result.get("status", "completed"),
         "sample_count": result.get("sample_count", 0),
         "source": result.get("source", "hermes"),
+    }
+
+
+def run_comparison_job(
+    *,
+    comparison_id: str,
+    database_url: str,
+    artifact_root: str,
+) -> dict:
+    store = DatabaseJobStore(database_url)
+    comparison_inputs = store.fetch_comparison_inputs(comparison_id)
+    comparison_dir = Path(artifact_root).expanduser().resolve() / comparison_id / "comparisons"
+    comparison_dir.mkdir(parents=True, exist_ok=True)
+    store.mark_comparison_running(comparison_id)
+
+    snapshots: list[VehicleSnapshot] = []
+    artifact_paths: list[str] = []
+    excluded: list[dict[str, str]] = []
+
+    for vehicle in comparison_inputs.vehicles:
+        try:
+            source_job_id = vehicle.source_job_id
+            if source_job_id:
+                store.mark_comparison_vehicle_status(vehicle.id, status="reused", source_job_id=source_job_id)
+            else:
+                child_job_id = store.ensure_comparison_child_job(vehicle, passphrase_version=comparison_inputs.passphrase_version)
+                store.mark_comparison_vehicle_status(vehicle.id, status="running", child_job_id=child_job_id)
+                child_result = run_job(job_id=child_job_id, database_url=database_url, artifact_root=artifact_root)
+                if child_result.get("status") not in {"completed", "completed_degraded"}:
+                    message = str(child_result.get("error_message") or "vehicle collection failed")
+                    store.mark_comparison_vehicle_status(
+                        vehicle.id,
+                        status="excluded",
+                        child_job_id=child_job_id,
+                        error_code=str(child_result.get("error_code") or "collection_failed"),
+                        error_message=message,
+                    )
+                    excluded.append({"model_name": vehicle.model_name, "reason": message})
+                    continue
+                source_job_id = child_job_id
+                store.mark_comparison_vehicle_status(vehicle.id, status="completed", child_job_id=child_job_id)
+
+            source_artifacts = store.comparison_source_artifacts(source_job_id)
+            if "final_report.json" not in source_artifacts or "analysis_facts.jsonl" not in source_artifacts:
+                raise RuntimeError(f"source job missing comparison JSON artifacts: {source_job_id}")
+            snapshot, copied_paths = _copy_snapshot_artifacts(
+                vehicle=vehicle,
+                source_job_id=source_job_id,
+                source_artifacts=source_artifacts,
+                output_dir=comparison_dir,
+            )
+            snapshots.append(snapshot)
+            artifact_paths.extend(copied_paths)
+        except Exception as exc:
+            error_message = str(exc) or exc.__class__.__name__
+            store.mark_comparison_vehicle_status(
+                vehicle.id,
+                status="excluded",
+                error_code=_error_code_from_exception(exc),
+                error_message=error_message,
+            )
+            excluded.append({"model_name": vehicle.model_name, "reason": error_message})
+
+    if len(snapshots) < 2:
+        message = "竞品对比至少需要 2 个可用车型结果"
+        store.mark_comparison_failed(comparison_id, error_code="insufficient_available_vehicles", error_message=message)
+        return {
+            "comparison_id": comparison_id,
+            "status": "failed",
+            "error_code": "insufficient_available_vehicles",
+            "error_message": message,
+            "available_vehicle_count": len(snapshots),
+            "excluded": excluded,
+        }
+
+    store.mark_comparison_comparing(comparison_id)
+    result = generate_comparison_outputs(
+        snapshots=snapshots,
+        output_dir=comparison_dir,
+        start_date=comparison_inputs.start_date,
+        end_date=comparison_inputs.end_date,
+        env=dict(os.environ),
+    )
+    artifact_paths.extend(result["artifact_paths"])
+    degraded = bool(excluded)
+    report_json = dict(result["report_json"])
+    if excluded:
+        report_json["excluded_vehicles"] = excluded
+    store.mark_comparison_completed(
+        comparison_id,
+        report_json=report_json,
+        artifact_paths=artifact_paths,
+        degraded=degraded,
+    )
+    return {
+        "comparison_id": comparison_id,
+        "status": "completed_degraded" if degraded else "completed",
+        "vehicle_count": len(snapshots),
+        "excluded": excluded,
     }

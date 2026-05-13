@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 import json
 import sys
 from pathlib import Path
@@ -275,6 +276,149 @@ def test_progress_endpoint_includes_collector_stage_percentages(tmp_path: Path) 
     assert stages["collecting_autohome"]["progress_message"] == "正在采集第 2 页"
     assert stages["collecting_dcd"]["progress_percent"] == 12
     assert stages["collecting_dcd"]["progress_message"] == "正在采集懂车帝第 1 页"
+
+
+def test_progress_endpoint_estimates_remaining_time_from_stage_history(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path)
+    verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify_response.status_code == 200
+
+    now = datetime.now(UTC)
+    session = get_session_local()()
+    try:
+        history = Job(
+            job_id="job_eta_history",
+            query="历史车",
+            model_name="历史车",
+            status="completed",
+            current_stage="completed",
+            degraded=False,
+            passphrase_version="2026-W17",
+            created_at=now - timedelta(hours=3),
+            started_at=now - timedelta(hours=3),
+            finished_at=now - timedelta(hours=1),
+        )
+        current = Job(
+            job_id="job_eta_current",
+            query="测试车",
+            model_name="测试车",
+            status="collecting_autohome",
+            current_stage="collecting_autohome",
+            degraded=False,
+            passphrase_version="2026-W17",
+            created_at=now - timedelta(minutes=5),
+            started_at=now - timedelta(minutes=5),
+        )
+        session.add_all([history, current])
+        session.add_all(
+            [
+                JobStageRun(
+                    job_id="job_eta_history",
+                    stage_name="collecting_autohome",
+                    attempt_no=1,
+                    status="success",
+                    started_at=now - timedelta(minutes=60),
+                    ended_at=now - timedelta(minutes=50),
+                    duration_ms=600_000,
+                ),
+                JobStageRun(
+                    job_id="job_eta_history",
+                    stage_name="collecting_dcd",
+                    attempt_no=1,
+                    status="success",
+                    started_at=now - timedelta(minutes=60),
+                    ended_at=now - timedelta(minutes=40),
+                    duration_ms=1_200_000,
+                ),
+                JobStageRun(
+                    job_id="job_eta_history",
+                    stage_name="postprocessing",
+                    attempt_no=1,
+                    status="success",
+                    started_at=now - timedelta(minutes=40),
+                    ended_at=now - timedelta(minutes=38),
+                    duration_ms=120_000,
+                ),
+                JobStageRun(
+                    job_id="job_eta_history",
+                    stage_name="generating_hermes_outputs",
+                    attempt_no=1,
+                    status="success",
+                    started_at=now - timedelta(minutes=38),
+                    ended_at=now - timedelta(minutes=32),
+                    duration_ms=360_000,
+                ),
+                JobStageRun(
+                    job_id="job_eta_current",
+                    stage_name="collecting_autohome",
+                    attempt_no=1,
+                    status="running",
+                    started_at=now - timedelta(minutes=5),
+                ),
+                JobStageRun(
+                    job_id="job_eta_current",
+                    stage_name="collecting_dcd",
+                    attempt_no=1,
+                    status="running",
+                    started_at=now - timedelta(minutes=5),
+                ),
+            ]
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    progress_dir = tmp_path / "artifacts" / "job_eta_current" / "progress"
+    progress_dir.mkdir(parents=True)
+    (progress_dir / "collecting_autohome.progress.json").write_text(
+        json.dumps({"percent": 50, "message": "汽车之家完成一半"}),
+        encoding="utf-8",
+    )
+    (progress_dir / "collecting_dcd.progress.json").write_text(
+        json.dumps({"percent": 25, "message": "懂车帝完成四分之一"}),
+        encoding="utf-8",
+    )
+
+    response = client.get("/api/jobs/job_eta_current/progress")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["estimated_remaining_seconds"] == 1380
+    assert payload["estimated_remaining_minutes"] == 23
+    assert payload["eta_label"] == "预计剩余 23 分钟"
+    assert payload["eta_confidence"] == "history"
+
+
+def test_progress_endpoint_returns_zero_eta_for_terminal_job(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path)
+    verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify_response.status_code == 200
+
+    session = get_session_local()()
+    try:
+        session.add(
+            Job(
+                job_id="job_eta_done",
+                query="测试车",
+                model_name="测试车",
+                status="completed",
+                current_stage="completed",
+                degraded=False,
+                passphrase_version="2026-W17",
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    response = client.get("/api/jobs/job_eta_done/progress")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["estimated_remaining_seconds"] == 0
+    assert payload["estimated_remaining_minutes"] == 0
+    assert payload["eta_label"] == "预计剩余 0 分钟"
+    assert payload["eta_confidence"] == "done"
 
 
 def test_progress_endpoint_returns_running_fallback_when_collector_progress_file_is_missing(tmp_path: Path) -> None:

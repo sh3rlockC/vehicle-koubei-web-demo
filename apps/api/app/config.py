@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     vehicle_resolve_platform_timeout_seconds: int = 60
     job_artifact_retention_days: int = 3
     job_artifact_cleanup_interval_seconds: int = 12 * 60 * 60
+    comparison_model_concurrency: int = 1
 
     model_config = SettingsConfigDict(
         env_file=".env",

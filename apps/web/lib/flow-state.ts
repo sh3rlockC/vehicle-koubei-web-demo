@@ -1,23 +1,40 @@
-import type { JobProgressResponse, SelectedCandidates, VehicleResolveResponse } from "@/lib/api-types";
+import type {
+  ComparisonOptionsResponse,
+  ComparisonProgressResponse,
+  ComparisonVehicleInput,
+  JobProgressResponse,
+  SelectedCandidates,
+  VehicleResolveResponse,
+} from "@/lib/api-types";
 
 const FLOW_STATE_KEY = "koubei-demo-flow";
 
 export type FlowState = {
   accessVersion: string | null;
+  mode: "single" | "comparison" | null;
   vehicleQuery: string | null;
   vehicleResolve: VehicleResolveResponse | null;
   selectedCandidates: SelectedCandidates | null;
   jobId: string | null;
   jobProgress: JobProgressResponse | null;
+  comparisonId: string | null;
+  comparisonOptions: ComparisonOptionsResponse | null;
+  comparisonVehicles: ComparisonVehicleInput[] | null;
+  comparisonProgress: ComparisonProgressResponse | null;
 };
 
 const initialState: FlowState = {
   accessVersion: null,
+  mode: null,
   vehicleQuery: null,
   vehicleResolve: null,
   selectedCandidates: null,
   jobId: null,
   jobProgress: null,
+  comparisonId: null,
+  comparisonOptions: null,
+  comparisonVehicles: null,
+  comparisonProgress: null,
 };
 
 function readState(): FlowState {

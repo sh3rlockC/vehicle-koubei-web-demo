@@ -6,7 +6,7 @@ import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
 import { SectionHeader, SignalPanel, StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError, toJsonBody } from "@/lib/api";
-import type { VehicleResolveResponse } from "@/lib/api-types";
+import type { ComparisonOptionsResponse, VehicleResolveResponse } from "@/lib/api-types";
 import { getFlowState, setFlowState } from "@/lib/flow-state";
 
 const exampleVehicles = ["风云T11", "风云X3L", "风云T9L", "QQ3"];
@@ -15,6 +15,10 @@ export default function VehiclePage() {
   const router = useRouter();
   const [ready, setReady] = useState(false);
   const [query, setQuery] = useState("");
+  const [mode, setMode] = useState<"single" | "comparison">("single");
+  const [comparisonQueries, setComparisonQueries] = useState(["", ""]);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -22,7 +26,11 @@ export default function VehiclePage() {
     setReady(true);
     const state = getFlowState();
     if (state.accessVersion) {
+      setMode(state.mode === "comparison" ? "comparison" : "single");
       setQuery(state.vehicleQuery ?? "");
+      if (state.comparisonVehicles?.length) {
+        setComparisonQueries(state.comparisonVehicles.map((vehicle) => vehicle.query));
+      }
     }
   }, []);
 
@@ -64,11 +72,16 @@ export default function VehiclePage() {
       });
 
       setFlowState({
+        mode: "single",
         vehicleQuery: trimmed,
         vehicleResolve: payload,
         selectedCandidates: null,
         jobId: null,
         jobProgress: null,
+        comparisonId: null,
+        comparisonOptions: null,
+        comparisonVehicles: null,
+        comparisonProgress: null,
       });
       router.push("/candidates");
     } catch (err) {
@@ -84,6 +97,60 @@ export default function VehiclePage() {
     }
   }
 
+  async function handleComparisonSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const vehicles = comparisonQueries.map((item) => item.trim()).filter(Boolean);
+    if (vehicles.length < 2) {
+      setError("多车型竞品对比至少需要 2 个车型。");
+      return;
+    }
+    if (new Set(vehicles.map((item) => item.toLowerCase())).size !== vehicles.length) {
+      setError("请不要重复输入同一个车型。");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    try {
+      const payload = await apiRequest<ComparisonOptionsResponse>("/api/comparisons/options", {
+        method: "POST",
+        body: toJsonBody({ vehicles: vehicles.map((vehicle) => ({ query: vehicle })) }),
+      });
+      setFlowState({
+        mode: "comparison",
+        vehicleQuery: vehicles.join(" / "),
+        vehicleResolve: null,
+        selectedCandidates: null,
+        jobId: null,
+        jobProgress: null,
+        comparisonId: null,
+        comparisonOptions: payload,
+        comparisonVehicles: null,
+        comparisonProgress: null,
+      });
+      if (startDate || endDate) {
+        window.sessionStorage.setItem("koubei-comparison-date-range", JSON.stringify({ startDate, endDate }));
+      } else {
+        window.sessionStorage.removeItem("koubei-comparison-date-range");
+      }
+      router.push("/candidates");
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        setError("访问会话已过期，请重新输入口令。");
+      } else if (err instanceof ApiError) {
+        setError(err.message);
+      } else {
+        setError("无法查询竞品对比选项，请稍后重试。");
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function updateComparisonQuery(index: number, value: string) {
+    setComparisonQueries((current) => current.map((item, itemIndex) => (itemIndex === index ? value : item)));
+  }
+
   return (
     <main className="page-grid">
       <SignalPanel tone="accent" className="stack-lg">
@@ -93,6 +160,16 @@ export default function VehiclePage() {
           copy="系统会先锁定汽车之家和懂车帝的车系 ID，确认后再投递给两个采集 agent。"
         />
 
+        <div className="meta-row">
+          <button className={`quick-chip ${mode === "single" ? "selected" : ""}`} type="button" onClick={() => setMode("single")}>
+            单车型评论收集
+          </button>
+          <button className={`quick-chip ${mode === "comparison" ? "selected" : ""}`} type="button" onClick={() => setMode("comparison")}>
+            多车型竞品对比
+          </button>
+        </div>
+
+        {mode === "single" ? (
         <form className="stack" onSubmit={handleSubmit}>
           <div className="field hero-input">
             <label htmlFor="query">车型名称</label>
@@ -121,6 +198,58 @@ export default function VehiclePage() {
             </button>
           </div>
         </form>
+        ) : (
+        <form className="stack" onSubmit={handleComparisonSubmit}>
+          <div className="split-grid">
+            {comparisonQueries.map((vehicle, index) => (
+              <div className="field" key={`comparison-${index}`}>
+                <label htmlFor={`comparison-${index}`}>车型 {index + 1}</label>
+                <input
+                  id={`comparison-${index}`}
+                  value={vehicle}
+                  onChange={(event) => updateComparisonQuery(index, event.target.value)}
+                  placeholder={index === 0 ? "输入主车型" : "输入竞品车型"}
+                />
+              </div>
+            ))}
+          </div>
+          <div className="meta-row">
+            <button
+              className="button secondary"
+              type="button"
+              disabled={comparisonQueries.length >= 5}
+              onClick={() => setComparisonQueries((current) => [...current, ""])}
+            >
+              添加车型
+            </button>
+            <button
+              className="button secondary"
+              type="button"
+              disabled={comparisonQueries.length <= 2}
+              onClick={() => setComparisonQueries((current) => current.slice(0, -1))}
+            >
+              移除末位
+            </button>
+          </div>
+          <div className="split-grid">
+            <div className="field">
+              <label htmlFor="comparison-start">开始日期</label>
+              <input id="comparison-start" type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+            </div>
+            <div className="field">
+              <label htmlFor="comparison-end">结束日期</label>
+              <input id="comparison-end" type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
+            </div>
+          </div>
+          <p className="field-hint">每个车型仍需确认汽车之家和懂车帝编号；72 小时内完整 JSON 结果会作为可复用选项。</p>
+          {error ? <p className="error">{error}</p> : null}
+          <div className="actions">
+            <button className="button" type="submit" disabled={loading || comparisonQueries.filter((item) => item.trim()).length < 2}>
+              {loading ? "正在查询对比选项" : "进入多车型确认"}
+            </button>
+          </div>
+        </form>
+        )}
       </SignalPanel>
 
       <aside className="stack">

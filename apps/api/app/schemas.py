@@ -110,6 +110,10 @@ class JobProgressResponse(BaseModel):
     overall_percent: int
     stages: list[StageStatusItem]
     message: str
+    estimated_remaining_seconds: int | None = None
+    estimated_remaining_minutes: int | None = None
+    eta_label: str = "预计剩余时间计算中"
+    eta_confidence: str = "unknown"
 
 
 class ArtifactItem(BaseModel):
@@ -118,6 +122,98 @@ class ArtifactItem(BaseModel):
     path: str
     url: str
     source_stage: str | None = None
+
+
+class ComparisonVehicleOptionRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=255)
+
+
+class ReusableJobOptionResponse(BaseModel):
+    job_id: str
+    model_name: str
+    finished_at: datetime | None = None
+    source: str
+
+
+class ComparisonVehicleOptionResponse(BaseModel):
+    query: str
+    resolve: VehicleResolveResponse
+    reuse_options: list[ReusableJobOptionResponse] = Field(default_factory=list)
+
+
+class ComparisonOptionsRequest(BaseModel):
+    vehicles: list[ComparisonVehicleOptionRequest] = Field(min_length=1, max_length=5)
+
+
+class ComparisonOptionsResponse(BaseModel):
+    vehicles: list[ComparisonVehicleOptionResponse] = Field(default_factory=list)
+
+
+class ComparisonVehicleInput(BaseModel):
+    query: str = Field(min_length=1, max_length=255)
+    model_name: str | None = Field(default=None, max_length=255)
+    selected_candidates: SelectedCandidates
+    reuse_job_id: str | None = Field(default=None, max_length=64)
+
+
+class ComparisonCreateRequest(BaseModel):
+    vehicles: list[ComparisonVehicleInput] = Field(min_length=2, max_length=5)
+    start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class ComparisonCreateResponse(BaseModel):
+    comparison_id: str
+    status: str
+    current_stage: str
+    progress_url: str
+    result_url: str
+
+
+class ComparisonVehicleProgress(BaseModel):
+    query: str
+    model_name: str
+    status: str
+    source_job_id: str | None = None
+    child_job_id: str | None = None
+    estimated_remaining_seconds: int | None = None
+    estimated_remaining_minutes: int | None = None
+    eta_label: str = "预计剩余时间计算中"
+    eta_confidence: str = "unknown"
+    error_message: str | None = None
+
+
+class ComparisonProgressResponse(BaseModel):
+    comparison_id: str
+    status: str
+    current_stage: str
+    degraded: bool
+    overall_percent: int
+    estimated_remaining_seconds: int | None = None
+    estimated_remaining_minutes: int | None = None
+    eta_label: str = "预计剩余时间计算中"
+    eta_confidence: str = "unknown"
+    vehicles: list[ComparisonVehicleProgress] = Field(default_factory=list)
+    message: str
+
+
+class ComparisonArtifactItem(BaseModel):
+    id: int
+    type: str
+    path: str
+    url: str
+    source_stage: str | None = None
+
+
+class ComparisonResultResponse(BaseModel):
+    comparison_id: str
+    status: str
+    degraded: bool
+    retention_days: int
+    vehicle_count: int
+    report_json: dict = Field(default_factory=dict)
+    artifacts: list[ComparisonArtifactItem] = Field(default_factory=list)
+    zip_url: str
 
 
 class TemplateReportResponse(BaseModel):
