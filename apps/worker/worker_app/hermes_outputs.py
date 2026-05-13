@@ -8,6 +8,15 @@ import shutil
 import subprocess
 import sys
 import time
+
+if __package__ in {None, ""}:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if sys.path and os.path.abspath(sys.path[0]) == script_dir:
+        sys.path.pop(0)
+    parent_dir = os.path.dirname(script_dir)
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
