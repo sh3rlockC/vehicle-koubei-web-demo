@@ -25,6 +25,10 @@ def _artifact_type_label(path: str) -> str:
         return "final_report_json"
     if lower_path.endswith("qa_chunks.json"):
         return "qa_chunks_json"
+    if lower_path.endswith("analysis_facts.jsonl"):
+        return "analysis_facts_jsonl"
+    if lower_path.endswith("llm_metrics.json"):
+        return "llm_metrics_json"
     if lower_path.endswith("优点词云.png"):
         return "wordcloud_positive"
     if lower_path.endswith("槽点词云.png"):

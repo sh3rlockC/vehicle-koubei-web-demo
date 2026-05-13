@@ -186,10 +186,14 @@ def test_time_report_detail_is_scoped_to_owning_job_and_zip_downloads_artifacts(
     report_dir = tmp_path / "artifacts" / "job_time" / "outputs" / "time_reports" / "time_report_1"
     report_dir.mkdir(parents=True)
     final_report = report_dir / "final_report.json"
+    analysis_facts = report_dir / "analysis_facts.jsonl"
+    llm_metrics = report_dir / "llm_metrics.json"
     summary = report_dir / "测试车_2026-03-02_2026-03-03_时间范围口碑摘要.xlsx"
     image = report_dir / "测试车_优点词云.png"
     terms = report_dir / "测试车_词云词项清单.xlsx"
     final_report.write_text('{"headline":"时间版一页纸"}', encoding="utf-8")
+    analysis_facts.write_text('{"comment_id":"autohome_0001"}\n', encoding="utf-8")
+    llm_metrics.write_text('{"source":"hermes-deepseek-api"}', encoding="utf-8")
     summary.write_text("xlsx-placeholder", encoding="utf-8")
     image.write_bytes(b"\x89PNG\r\n\x1a\n")
     terms.write_text("xlsx-placeholder", encoding="utf-8")
@@ -206,7 +210,7 @@ def test_time_report_detail_is_scoped_to_owning_job_and_zip_downloads_artifacts(
             sample_count=2,
             platform_counts={"汽车之家": 1, "懂车帝": 1},
             report_json={"headline": "时间版一页纸"},
-            artifact_paths=[str(final_report), str(summary), str(image), str(terms)],
+            artifact_paths=[str(final_report), str(analysis_facts), str(llm_metrics), str(summary), str(image), str(terms)],
             source="hermes-local-aggregate",
         )
         session.add(report)
@@ -223,6 +227,8 @@ def test_time_report_detail_is_scoped_to_owning_job_and_zip_downloads_artifacts(
         names = set(archive.namelist())
 
     assert "final_report.json" in names
+    assert "analysis_facts.jsonl" in names
+    assert "llm_metrics.json" in names
     assert "测试车_2026-03-02_2026-03-03_时间范围口碑摘要.xlsx" in names
     assert "测试车_优点词云.png" in names
     assert "测试车_词云词项清单.xlsx" in names
