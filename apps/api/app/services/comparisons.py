@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from math import ceil
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -18,6 +19,7 @@ from app.schemas import (
 )
 from app.services.confirmed_vehicle_series import query_key
 from app.services.eta import EtaEstimate, estimate_full_job_seconds, estimate_job_progress_eta
+from app.services.stage_progress import read_stage_progress
 
 REUSABLE_JOB_STATUSES = {"completed", "completed_degraded"}
 COMPARISON_TERMINAL_STATUSES = {"completed", "completed_degraded", "failed", "cancelled", "expired"}
@@ -135,7 +137,21 @@ def artifact_item(artifact: JobArtifact, job_id: str) -> ArtifactItem:
     )
 
 
-def _vehicle_eta(db: Session, vehicle: ComparisonVehicle) -> EtaEstimate:
+def _stage_items_with_live_progress(settings: Settings, job: Job, stage_runs: list[JobStageRun]) -> list[SimpleNamespace]:
+    items: list[SimpleNamespace] = []
+    for stage in stage_runs:
+        progress_percent, _message = read_stage_progress(settings, job.job_id, stage.stage_name, stage.status)
+        items.append(
+            SimpleNamespace(
+                name=stage.stage_name,
+                status=stage.status,
+                progress_percent=progress_percent,
+            )
+        )
+    return items
+
+
+def _vehicle_eta(db: Session, settings: Settings, vehicle: ComparisonVehicle) -> EtaEstimate:
     if vehicle.status in {"reused", "completed"}:
         return EtaEstimate(0, 0, "预计剩余 0 分钟", "done")
     if vehicle.status in {"failed", "excluded"}:
@@ -149,11 +165,11 @@ def _vehicle_eta(db: Session, vehicle: ComparisonVehicle) -> EtaEstimate:
                 .order_by(JobStageRun.id.asc())
                 .all()
             )
-            return estimate_job_progress_eta(db, job, stage_runs)
+            return estimate_job_progress_eta(db, job, _stage_items_with_live_progress(settings, job, stage_runs))
     return estimate_full_job_seconds(db)
 
 
-def comparison_progress_payload(db: Session, comparison: ComparisonJob) -> ComparisonProgressResponse:
+def comparison_progress_payload(db: Session, settings: Settings, comparison: ComparisonJob) -> ComparisonProgressResponse:
     vehicles = sorted(comparison.vehicles, key=lambda item: item.position)
     vehicle_payloads: list[ComparisonVehicleProgress] = []
     total_seconds = 0
@@ -161,7 +177,7 @@ def comparison_progress_payload(db: Session, comparison: ComparisonJob) -> Compa
     completed_count = 0
 
     for vehicle in vehicles:
-        eta = _vehicle_eta(db, vehicle)
+        eta = _vehicle_eta(db, settings, vehicle)
         if eta.estimated_remaining_seconds is not None:
             total_seconds += eta.estimated_remaining_seconds
         if eta.eta_confidence == "history":

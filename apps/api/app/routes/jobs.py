@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from io import BytesIO
-import json
 import logging
 from pathlib import Path
 from urllib.parse import quote
@@ -47,6 +46,7 @@ from app.services.passphrase import require_passphrase_session
 from app.services.qa_service import answer_job_question, find_summary_artifact
 from app.services.result_reader import read_wordcloud_terms_workbook_or_empty
 from app.services.result_assembler import assemble_job_result
+from app.services.stage_progress import read_stage_progress
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 logger = logging.getLogger(__name__)
@@ -55,43 +55,6 @@ QUEUE_UNAVAILABLE_MESSAGE = "任务队列暂不可用，请确认 Redis 和 work
 
 def _ensure_session(request: Request, settings: Settings) -> None:
     require_passphrase_session(request, settings)
-
-
-def _clamp_percent(value: object) -> int | None:
-    try:
-        percent = int(float(value))
-    except (TypeError, ValueError):
-        return None
-    return max(0, min(100, percent))
-
-
-def _read_stage_progress(settings: Settings, job_id: str, stage_name: str, stage_status: str) -> tuple[int | None, str | None]:
-    if stage_name not in {"collecting_autohome", "collecting_dcd", "generating_hermes_outputs"}:
-        return None, None
-
-    progress_path = settings.artifact_root_path / job_id / "progress" / f"{stage_name}.progress.json"
-    payload: dict = {}
-    if progress_path.exists():
-        try:
-            payload = json.loads(progress_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            payload = {}
-
-    percent = _clamp_percent(payload.get("percent"))
-    if percent is None and isinstance(payload.get("overall"), dict):
-        percent = _clamp_percent(payload["overall"].get("percent"))
-    if percent is None:
-        if stage_status in {"success", "completed"}:
-            percent = 100
-        elif stage_status == "running":
-            percent = 1
-        else:
-            percent = 0
-
-    message = payload.get("message")
-    if not message and stage_status == "running":
-        message = "采集已启动，等待页面进度"
-    return percent, message if isinstance(message, str) and message else None
 
 
 def _is_result_bundle_artifact(path: str) -> bool:
@@ -260,7 +223,7 @@ def get_job_progress(
     )
     stages = []
     for stage in stage_runs:
-        progress_percent, progress_message = _read_stage_progress(settings, job_id, stage.stage_name, stage.status)
+        progress_percent, progress_message = read_stage_progress(settings, job_id, stage.stage_name, stage.status)
         stages.append(
             StageStatusItem(
                 name=stage.stage_name,
