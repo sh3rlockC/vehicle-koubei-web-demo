@@ -1,109 +1,107 @@
-# 车型口碑情报舱 Web Demo
+# 车型口碑情报舱
 
-一个面向汽车产品、营销和用户洞察团队的口碑分析 Demo。用户通过网页输入车型名称，系统自动完成车型识别、汽车之家/懂车帝口碑采集、摘要分析、词云生成、AI 一页纸、智能问答和结果文件打包下载。
+面向汽车产品、营销和用户洞察团队的口碑分析 Web Demo。用户输入车型后，系统完成车系确认、汽车之家/懂车帝双平台采集、后处理、Hermes + DeepSeek 输出分析、AI 一页纸、词云、问答和 ZIP 交付物下载。
 
-## 中文界面
+## 当前能力
 
-项目已经完成中文化 Web 界面，主要页面包括：
+- 车型候选确认：识别汽车之家、懂车帝车系 ID，并复用历史确认结果。
+- 双平台采集：`collecting_autohome` 和 `collecting_dcd` 通过 OpenClaw 分别调用采集 Agent。
+- Hermes 输出阶段：`postprocessing` 后由 Worker 统一生成最终摘要、词云词项、AI 一页纸、QA 语料和兼容旧结果页的产物。
+- DeepSeek 直连：批次分析默认使用 `deepseek-v4-flash`，最终聚合默认使用 `deepseek-v4-pro`，结构化输出启用 JSON mode。
+- 标准原评论 JSON 层：保留完整脱敏 `normalized_comments.jsonl`，并生成压缩后的 `analysis_facts.jsonl` 供 LLM 批次分析，降低 token 消耗。
+- 时间范围一页纸：结果页可按日期预览脱敏评论，并为指定时间范围生成独立的一页纸版本和 ZIP。
+- 结果口径：摘要字段统一为 `核心好评`、`核心槽点`、`最满意TOP` 和 `最不满意TOP`。
+- 降级策略：批次失败只回退该批本地规则；聚合超时回退本地归并；缺少 LLM key 时走规则兜底并标记降级。
+- 交付物下载：摘要 Excel、词云 PNG、词项清单、关键词榜、`final_report.json`、QA chunks、LLM metrics 和 ZIP。
 
-- **访问口令页**：通过每周口令进入系统，不需要账号登录。
-- **车型输入页**：输入车型名称，例如 `风云T9L`、`QQ3`。
-- **候选确认页**：确认汽车之家和懂车帝车系 ID，识别失败时可手动填写。
-- **任务进度页**：展示汽车之家和懂车帝双采集进度条，以及当前阶段状态。
-- **结果洞察页**：展示样本量、AI 一页纸、模板摘要、词云、关键词次数榜单、智能问答和 ZIP 下载入口。
+## 主流程
 
-## 核心能力
+```text
+Web UI
+  -> FastAPI
+  -> Redis / RQ Worker
+  -> OpenClaw 双平台采集
+  -> postprocessing
+  -> Hermes + DeepSeek 输出分析
+  -> 结果页 / QA / 时间范围一页纸 / ZIP
+```
 
-- 输入车型名称后自动解析车系候选。
-- 支持把用户确认过的汽车之家/懂车帝车系 ID 保存到服务器，后续同车型优先复用。
-- 支持汽车之家和懂车帝双平台口碑采集。
-- 支持异步任务队列和网页进度轮询。
-- 支持原始 Excel、摘要 Excel、词云图片和词项清单输出。
-- 支持按词项出现次数生成优点、槽点和全部关键词三类条形榜单，并在 ZIP 下载包中附带三张 PNG 排名图。
-- 支持一键下载全部结果 ZIP。
-- 支持服务器自动清理任务评论产物，默认结果文件和评论数据保留 3 天。
-- 支持 AI 一页纸报告。
-- 支持基于当前任务结果的智能问答。
-- 支持 OpenClaw Agent 调用采集 skill。
-- 支持单机 Docker Compose 部署。
+## 数据与隐私
+
+LLM 输入只使用分析必要字段：
+
+- 平台
+- 日期
+- 车型
+- 最满意
+- 最不满意
+- 评价全文
+
+用户名、来源链接、购车地、精确地点等非必要字段不会进入 LLM prompt。完整脱敏评论保存在 `normalized_comments.jsonl`，LLM 批次输入使用规则压缩后的 `analysis_facts.jsonl`。
+
+## 主要 API
+
+- `GET /api/jobs/{job_id}/result`：读取主结果页数据。
+- `GET /api/jobs/{job_id}/download`：下载主任务 ZIP。
+- `POST /api/jobs/{job_id}/qa`：基于当前任务结果问答。
+- `GET /api/jobs/{job_id}/comments/summary`：读取评论日期分布。
+- `GET /api/jobs/{job_id}/comments`：分页预览指定时间范围的脱敏评论。
+- `POST /api/jobs/{job_id}/time-reports`：创建时间范围一页纸任务。
+- `GET /api/jobs/{job_id}/time-reports`：读取时间范围一页纸历史。
+- `GET /api/jobs/{job_id}/time-reports/{report_id}/artifacts.zip`：下载时间范围一页纸 ZIP。
 
 ## 技术栈
 
-- 前端：TypeScript、React、Next.js
-- 后端：Python、FastAPI
-- 异步任务：Redis、RQ Worker
+- Web：Next.js、React、TypeScript
+- API：FastAPI、SQLAlchemy
+- Worker：Python、RQ、Redis
 - 数据库：PostgreSQL
 - 部署：Docker Compose、Nginx
 - Agent 执行层：OpenClaw
-- AI 能力：OpenAI-compatible LLM API，可配置 DeepSeek、MiniMax 等模型
+- LLM：DeepSeek OpenAI-compatible Chat Completions
 
-## 项目结构
+## 关键配置
 
-```text
-vehicle-koubei-web-demo/
-  apps/
-    web/       # Next.js 中文前端
-    api/       # FastAPI 后端
-    worker/    # RQ 异步任务 worker
-  config/      # 流程和依赖配置
-  docs/        # 部署、交接、复盘文档
-  ops/         # Docker、Nginx、systemd 配置
-  storage/     # 本地产物目录，实际结果不应提交
+不要把密钥写入镜像或提交到仓库。生产环境通过 `.env` 注入：
+
+```env
+OPENCLAW_ADAPTER_ENABLED=true
+OPENCLAW_ADAPTER_STAGES=collecting_autohome,collecting_dcd
+
+LLM_PROVIDER=deepseek
+LLM_BASE_URL=https://api.deepseek.com
+LLM_API_KEY=...
+LLM_MODEL_BATCH=deepseek-v4-flash
+LLM_MODEL_REPORT=deepseek-v4-pro
+LLM_MODEL_QA=deepseek-v4-pro
+
+HERMES_LLM_MODE=api
+HERMES_BATCH_CONCURRENCY=3
+HERMES_BATCH_TARGET_BYTES=45000
+HERMES_TIMEOUT_SECONDS=180
+HERMES_AGGREGATE_TIMEOUT_SECONDS=180
+HERMES_JSON_RETRIES=1
 ```
 
-## 外部 skill 依赖
+完整部署说明见 [docs/cloud-deployment.md](docs/cloud-deployment.md)，OpenClaw 流程说明见 [docs/openclaw-skill-flow.md](docs/openclaw-skill-flow.md)。
 
-当前 Demo 复用以下独立仓库或 skill，并通过稳定的产物 contract 串联：
+## 本地验证
 
-- `vehicle-id-finder`
-- `auto-koubei-collector`
-- `dcd-koubei-collector`
-- `koubei-keyword-summary-skill`
-- `koubei-wordcloud`
-- `koubei-postprocess`
-
-推荐 workspace 布局：
-
-```text
-codexwork/
-  vehicle-koubei-web-demo/
-  data/repos/
-    vehicle-id-finder/
-    auto-koubei-collector/
-    dcd-koubei-collector/
-    koubei-postprocess/
-    koubei-keyword-summary-skill/
-  koubei-wordcloud/
+```bash
+APP_ENV=test DATABASE_URL='sqlite+pysqlite:////tmp/vehicle-koubei-pytest.db' .venv/bin/pytest apps/api/tests apps/worker/tests -q
+npm --prefix apps/web run typecheck
+npm --prefix apps/web run build
+docker compose config --quiet
 ```
 
-
-## 云端部署
-
-当前推荐单机部署：
-
-- 2C4G 可跑通小规模 Demo。
-- 4C8G 更适合部门内部多人试用。
-- Ubuntu 22.04/24.04 LTS。
-- Docker Compose 部署 Web/API/Worker/Postgres/Redis/Nginx。
-- OpenClaw 以宿主机 systemd 服务运行，默认不暴露公网端口。
-
-
-
-## OpenClaw Agent 流程
-
-当前 OpenClaw 只作为采集阶段执行层：
+## 目录结构
 
 ```text
-collecting_autohome -> agent_id=autohome -> auto-koubei-collector
-collecting_dcd      -> agent_id=dongchedi -> dcd-koubei-collector
+apps/web      # Next.js 前端
+apps/api      # FastAPI 服务
+apps/worker   # RQ Worker、采集编排、Hermes 输出
+config        # 流程配置
+docs          # 部署、OpenClaw、交接文档
+ops           # Docker、Nginx、启动脚本
+storage       # 本地产物目录，不提交真实任务结果
 ```
-
-Worker 仍是唯一总编排层，负责：
-
-- 队列执行
-- 过期任务产物清理，清理循环以独立后台进程运行，不参与 RQ job fork 执行
-- 阶段状态
-- 进度聚合
-- 日志记录
-- 产物校验
-- 降级策略
