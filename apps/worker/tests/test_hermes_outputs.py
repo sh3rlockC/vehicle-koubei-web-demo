@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -380,6 +381,21 @@ def test_call_hermes_timeout_uses_concise_error_without_prompt(tmp_path: Path) -
     message = str(exc_info.value)
     assert message == "hermes_timeout:aggregate:1s"
     assert "SECRET_PROMPT_SHOULD_NOT_APPEAR" not in message
+
+
+def test_hermes_outputs_script_help_does_not_shadow_stdlib_queue() -> None:
+    script = ROOT / "worker_app" / "hermes_outputs.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=script.parent,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert "Generate final koubei outputs" in completed.stdout
+    assert "worker_app/queue.py" not in completed.stderr
 
 
 def _write_fake_summary_script(path: Path) -> None:
