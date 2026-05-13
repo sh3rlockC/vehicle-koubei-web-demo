@@ -187,7 +187,7 @@ def get_comparison_progress(
     comparison = db.get(ComparisonJob, comparison_id)
     if comparison is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="comparison not found")
-    return comparison_progress_payload(db, comparison)
+    return comparison_progress_payload(db, settings, comparison)
 
 
 @router.get("/{comparison_id}", response_model=ComparisonResultResponse)

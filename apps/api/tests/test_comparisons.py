@@ -24,6 +24,7 @@ from app.models import (
     Job,
     JobArtifact,
     JobCandidate,
+    JobStageRun,
 )
 from app.services.job_queue import get_job_queue
 from app.services.passphrase import hash_passphrase
@@ -270,6 +271,85 @@ def test_comparison_progress_reports_reused_vehicle_with_zero_eta(tmp_path: Path
     assert reused["status"] == "reused"
     assert reused["estimated_remaining_seconds"] == 0
     assert reused["eta_label"] == "预计剩余 0 分钟"
+
+
+def test_comparison_progress_uses_child_job_live_stage_progress(tmp_path: Path) -> None:
+    client, _queue = make_client(tmp_path)
+    authorize(client)
+    progress_dir = tmp_path / "artifacts" / "job_child" / "progress"
+    progress_dir.mkdir(parents=True, exist_ok=True)
+    (progress_dir / "generating_hermes_outputs.progress.json").write_text(
+        json.dumps({"percent": 70, "message": "Hermes 汇总批次结果"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    session = get_session_local()()
+    now = datetime.now(UTC)
+    try:
+        session.add(
+            Job(
+                job_id="job_child",
+                query="测试车A",
+                model_name="测试车A",
+                status="generating_hermes_outputs",
+                current_stage="generating_hermes_outputs",
+                degraded=False,
+                passphrase_version="2026-W17",
+                started_at=now - timedelta(minutes=10),
+            )
+        )
+        session.add_all(
+            [
+                JobStageRun(job_id="job_child", stage_name="collecting_autohome", status="success", duration_ms=1000),
+                JobStageRun(job_id="job_child", stage_name="collecting_dcd", status="success", duration_ms=1000),
+                JobStageRun(job_id="job_child", stage_name="postprocessing", status="success", duration_ms=1000),
+                JobStageRun(job_id="job_child", stage_name="generating_hermes_outputs", status="running"),
+            ]
+        )
+        session.add(
+            ComparisonJob(
+                comparison_id="cmp_live_eta",
+                status="running",
+                current_stage="collecting_models",
+                passphrase_version="2026-W17",
+                vehicle_count=2,
+            )
+        )
+        session.add_all(
+            [
+                ComparisonVehicle(
+                    comparison_id="cmp_live_eta",
+                    query="测试车A",
+                    model_name="测试车A",
+                    position=1,
+                    status="running",
+                    child_job_id="job_child",
+                    selected_candidates=selected_candidates("1001", "2001", "测试车A"),
+                ),
+                ComparisonVehicle(
+                    comparison_id="cmp_live_eta",
+                    query="测试车B",
+                    model_name="测试车B",
+                    position=2,
+                    status="reused",
+                    source_job_id="job_reused",
+                    selected_candidates=selected_candidates("1002", "2002", "测试车B"),
+                ),
+            ]
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    response = client.get("/api/comparisons/cmp_live_eta/progress")
+
+    assert response.status_code == 200
+    payload = response.json()
+    running = payload["vehicles"][0]
+    assert running["estimated_remaining_seconds"] == 270
+    assert running["estimated_remaining_minutes"] == 5
+    assert payload["estimated_remaining_seconds"] == 870
+    assert payload["estimated_remaining_minutes"] == 15
 
 
 def test_comparison_zip_downloads_comparison_outputs_and_source_snapshots(tmp_path: Path) -> None:
