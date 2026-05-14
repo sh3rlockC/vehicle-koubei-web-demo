@@ -778,6 +778,11 @@ details.card summary {
   text-align: left;
 }
 
+.comparison-table .winner-cell {
+  color: var(--text-strong);
+  font-weight: 700;
+}
+
 .comparison-table .mention-positive {
   color: var(--success);
 }

@@ -137,6 +137,30 @@ def _mentioned_dimensions(text: str) -> set[str]:
     return mentioned
 
 
+def _dimension_winner(vehicles: list[dict[str, Any]]) -> dict[str, Any]:
+    scored: list[tuple[dict[str, Any], float]] = []
+    for vehicle in vehicles:
+        positive = int(vehicle["positive_mentions"])
+        negative = int(vehicle["negative_mentions"])
+        total = positive + negative
+        if total <= 0:
+            continue
+        scored.append((vehicle, positive / total))
+
+    if not scored:
+        return {"winner_model_names": [], "winner_score": None, "winner_label": "无数据"}
+
+    best_score = max(score for _vehicle, score in scored)
+    score_winners = [(vehicle, score) for vehicle, score in scored if score == best_score]
+    best_positive = max(int(vehicle["positive_mentions"]) for vehicle, _score in score_winners)
+    winners = [str(vehicle["model_name"]) for vehicle, _score in score_winners if int(vehicle["positive_mentions"]) == best_positive]
+    return {
+        "winner_model_names": winners,
+        "winner_score": best_score,
+        "winner_label": "、".join(winners),
+    }
+
+
 def _dimension_matrix(
     snapshots: list[VehicleSnapshot],
     *,
@@ -163,27 +187,29 @@ def _dimension_matrix(
 
     rows: list[dict[str, Any]] = []
     for dimension, _keywords in DIMENSION_KEYWORDS:
+        vehicle_rows = [
+            {
+                "model_name": snapshot.model_name,
+                "positive_mentions": len(
+                    per_vehicle[snapshot.model_name][dimension]["positive_evidence_ids"]
+                ),
+                "negative_mentions": len(
+                    per_vehicle[snapshot.model_name][dimension]["negative_evidence_ids"]
+                ),
+                "positive_evidence_ids": sorted(
+                    per_vehicle[snapshot.model_name][dimension]["positive_evidence_ids"]
+                ),
+                "negative_evidence_ids": sorted(
+                    per_vehicle[snapshot.model_name][dimension]["negative_evidence_ids"]
+                ),
+            }
+            for snapshot in snapshots
+        ]
         rows.append(
             {
                 "dimension": dimension,
-                "vehicles": [
-                    {
-                        "model_name": snapshot.model_name,
-                        "positive_mentions": len(
-                            per_vehicle[snapshot.model_name][dimension]["positive_evidence_ids"]
-                        ),
-                        "negative_mentions": len(
-                            per_vehicle[snapshot.model_name][dimension]["negative_evidence_ids"]
-                        ),
-                        "positive_evidence_ids": sorted(
-                            per_vehicle[snapshot.model_name][dimension]["positive_evidence_ids"]
-                        ),
-                        "negative_evidence_ids": sorted(
-                            per_vehicle[snapshot.model_name][dimension]["negative_evidence_ids"]
-                        ),
-                    }
-                    for snapshot in snapshots
-                ],
+                **_dimension_winner(vehicle_rows),
+                "vehicles": vehicle_rows,
             }
         )
     return rows
@@ -298,7 +324,7 @@ def _write_dimension_workbook(path: Path, *, conclusion: dict[str, Any], dimensi
     workbook = Workbook()
     matrix = workbook.active
     matrix.title = "维度对比"
-    header = ["维度"]
+    header = ["维度", "车型对比胜者"]
     for vehicle in vehicles:
         model_name = str(vehicle["model_name"])
         header.extend([f"{model_name} 优点提及数", f"{model_name} 槽点提及数"])
@@ -308,17 +334,18 @@ def _write_dimension_workbook(path: Path, *, conclusion: dict[str, Any], dimensi
         cell.fill = HEADER_FILL
 
     for row in dimensions:
-        values: list[Any] = [row["dimension"]]
+        values: list[Any] = [row["dimension"], row.get("winner_label") or "无数据"]
         for vehicle in row["vehicles"]:
             values.extend([vehicle["positive_mentions"], vehicle["negative_mentions"]])
         matrix.append(values)
         row_index = matrix.max_row
-        for column_index in range(2, len(values) + 1):
-            matrix.cell(row=row_index, column=column_index).fill = POSITIVE_FILL if column_index % 2 == 0 else NEGATIVE_FILL
+        for column_index in range(3, len(values) + 1):
+            matrix.cell(row=row_index, column=column_index).fill = POSITIVE_FILL if (column_index - 3) % 2 == 0 else NEGATIVE_FILL
 
-    matrix.freeze_panes = "B2"
+    matrix.freeze_panes = "C2"
     matrix.column_dimensions["A"].width = 22
-    for column_cells in matrix.iter_cols(min_col=2, max_col=matrix.max_column):
+    matrix.column_dimensions["B"].width = 24
+    for column_cells in matrix.iter_cols(min_col=3, max_col=matrix.max_column):
         matrix.column_dimensions[column_cells[0].column_letter].width = 18
 
     conclusion_sheet = workbook.create_sheet("结论")

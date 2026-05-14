@@ -8,6 +8,10 @@ Minimal Next.js app skeleton for the vehicle koubei demo flow:
 - `/progress`
 - `/result`
 
+The first screen supports both single-vehicle collection and multi-vehicle comparison. The
+comparison result page renders the LLM conclusion, a dimension matrix with per-dimension
+winners, and download buttons without listing every ZIP member inline.
+
 The app proxies `/api/*` to the backend origin configured by `BACKEND_ORIGIN` and uses
 `sessionStorage` only for route continuity.
 
