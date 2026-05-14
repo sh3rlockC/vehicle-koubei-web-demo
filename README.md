@@ -10,9 +10,10 @@
 - DeepSeek 直连：批次分析默认使用 `deepseek-v4-flash`，最终聚合默认使用 `deepseek-v4-pro`，结构化输出启用 JSON mode。
 - 标准原评论 JSON 层：保留完整脱敏 `normalized_comments.jsonl`，并生成压缩后的 `analysis_facts.jsonl` 供 LLM 批次分析，降低 token 消耗。
 - 时间范围一页纸：结果页可按日期预览脱敏评论，并为指定时间范围生成独立的一页纸版本和 ZIP。
+- 多车型竞品对比：支持 2-5 个车型对比，复用 72 小时内完整历史结果，并生成 LLM 对比结论、多维度优劣提及数矩阵和胜者列。
 - 结果口径：摘要字段统一为 `核心好评`、`核心槽点`、`最满意TOP` 和 `最不满意TOP`。
 - 降级策略：批次失败只回退该批本地规则；聚合超时回退本地归并；缺少 LLM key 时走规则兜底并标记降级。
-- 交付物下载：摘要 Excel、词云 PNG、词项清单、关键词榜、`final_report.json`、QA chunks、LLM metrics 和 ZIP。
+- 交付物下载：ZIP 面向业务交付，仅包含 Excel、词云 PNG、词项清单和关键词榜图片；内部 JSON/JSONL/metrics 保留用于页面展示、复用判断和问答，不进入下载包。
 
 ## 主流程
 
@@ -23,7 +24,7 @@ Web UI
   -> OpenClaw 双平台采集
   -> postprocessing
   -> Hermes + DeepSeek 输出分析
-  -> 结果页 / QA / 时间范围一页纸 / ZIP
+  -> 结果页 / QA / 时间范围一页纸 / 竞品对比 / ZIP
 ```
 
 ## 数据与隐私
@@ -49,6 +50,11 @@ LLM 输入只使用分析必要字段：
 - `POST /api/jobs/{job_id}/time-reports`：创建时间范围一页纸任务。
 - `GET /api/jobs/{job_id}/time-reports`：读取时间范围一页纸历史。
 - `GET /api/jobs/{job_id}/time-reports/{report_id}/artifacts.zip`：下载时间范围一页纸 ZIP。
+- `POST /api/comparisons/options`：解析多车型候选并返回可复用的历史结果。
+- `POST /api/comparisons`：创建多车型竞品对比任务。
+- `GET /api/comparisons/{comparison_id}`：读取对比结果 JSON，用于网页展示 LLM 结论和维度矩阵。
+- `GET /api/comparisons/{comparison_id}/progress`：读取对比任务总进度、车型进度和 ETA。
+- `GET /api/comparisons/{comparison_id}/artifacts.zip`：下载对比 ZIP，内容只包含 Excel/PNG 业务产物。
 
 ## 技术栈
 
