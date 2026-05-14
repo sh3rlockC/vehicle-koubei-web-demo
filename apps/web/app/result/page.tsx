@@ -67,6 +67,9 @@ type ComparisonDimensionVehicle = {
 
 type ComparisonDimensionRow = {
   dimension: string;
+  winner_model_names: string[];
+  winner_score: number | null;
+  winner_label: string;
   vehicles: ComparisonDimensionVehicle[];
 };
 
@@ -84,6 +87,10 @@ function asNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+function asOptionalNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 function comparisonConclusion(report: Record<string, unknown> | undefined): ComparisonConclusion {
   const conclusion = asRecord(report?.conclusion);
   const bullets = Array.isArray(conclusion.rationale_bullets)
@@ -96,22 +103,53 @@ function comparisonConclusion(report: Record<string, unknown> | undefined): Comp
   };
 }
 
+function dimensionWinner(vehicles: ComparisonDimensionVehicle[]) {
+  const scored = vehicles
+    .map((vehicle) => {
+      const total = vehicle.positive_mentions + vehicle.negative_mentions;
+      return total > 0 ? { vehicle, score: vehicle.positive_mentions / total } : null;
+    })
+    .filter((item): item is { vehicle: ComparisonDimensionVehicle; score: number } => item !== null);
+  if (!scored.length) {
+    return { winner_model_names: [], winner_score: null, winner_label: "无数据" };
+  }
+  const bestScore = Math.max(...scored.map((item) => item.score));
+  const scoreWinners = scored.filter((item) => Math.abs(item.score - bestScore) < 1e-12);
+  const bestPositive = Math.max(...scoreWinners.map((item) => item.vehicle.positive_mentions));
+  const winners = scoreWinners
+    .filter((item) => item.vehicle.positive_mentions === bestPositive)
+    .map((item) => item.vehicle.model_name || "车型");
+  return {
+    winner_model_names: winners,
+    winner_score: bestScore,
+    winner_label: winners.join("、"),
+  };
+}
+
 function comparisonDimensions(report: Record<string, unknown> | undefined): ComparisonDimensionRow[] {
   const rows = Array.isArray(report?.dimensions) ? report.dimensions : [];
   return rows
     .map((row) => {
       const record = asRecord(row);
       const vehicles = Array.isArray(record.vehicles) ? record.vehicles : [];
+      const parsedVehicles = vehicles.map((vehicle) => {
+        const item = asRecord(vehicle);
+        return {
+          model_name: asText(item.model_name),
+          positive_mentions: asNumber(item.positive_mentions),
+          negative_mentions: asNumber(item.negative_mentions),
+        };
+      });
+      const fallbackWinner = dimensionWinner(parsedVehicles);
+      const winnerNames = Array.isArray(record.winner_model_names)
+        ? record.winner_model_names.map((item) => asText(item)).filter(Boolean)
+        : fallbackWinner.winner_model_names;
       return {
         dimension: asText(record.dimension),
-        vehicles: vehicles.map((vehicle) => {
-          const item = asRecord(vehicle);
-          return {
-            model_name: asText(item.model_name),
-            positive_mentions: asNumber(item.positive_mentions),
-            negative_mentions: asNumber(item.negative_mentions),
-          };
-        }),
+        winner_model_names: winnerNames,
+        winner_score: asOptionalNumber(record.winner_score) ?? fallbackWinner.winner_score,
+        winner_label: asText(record.winner_label, fallbackWinner.winner_label),
+        vehicles: parsedVehicles,
       };
     })
     .filter((row) => row.dimension && row.vehicles.length);
@@ -595,7 +633,8 @@ export default function ResultPage() {
               <table className="comparison-table">
                 <thead>
                   <tr>
-                    <th>维度</th>
+                    <th rowSpan={2}>维度</th>
+                    <th rowSpan={2}>车型对比胜者</th>
                     {dimensions[0].vehicles.map((vehicle) => (
                       <th colSpan={2} key={vehicle.model_name || "车型"}>
                         {vehicle.model_name || "车型"}
@@ -603,7 +642,6 @@ export default function ResultPage() {
                     ))}
                   </tr>
                   <tr>
-                    <th />
                     {dimensions[0].vehicles.map((vehicle) => (
                       <Fragment key={`${vehicle.model_name}-heads`}>
                         <th className="mention-positive">优点提及数</th>
@@ -616,6 +654,7 @@ export default function ResultPage() {
                   {dimensions.map((row) => (
                     <tr key={row.dimension}>
                       <th>{row.dimension}</th>
+                      <td className="winner-cell">{row.winner_label}</td>
                       {row.vehicles.map((vehicle) => (
                         <Fragment key={`${row.dimension}-${vehicle.model_name}`}>
                           <td className="mention-positive">{vehicle.positive_mentions}</td>
@@ -630,29 +669,22 @@ export default function ResultPage() {
           ) : (
             <p className="status-copy">当前对比结果暂未返回维度矩阵。</p>
           )}
-          {dimensionExcel ? (
-            <div className="actions" style={{ marginTop: 16 }}>
-              <a className="button secondary" href={dimensionExcel.url}>
-                下载多维度 Excel
-              </a>
-            </div>
-          ) : null}
         </div>
 
         <div className="card">
-          <h3>结果文件</h3>
-          <div className="artifact-grid">
-            {comparisonArtifacts.map((artifact) => (
-              <a key={artifact.id} className="artifact-card" href={artifact.url}>
-                <strong>{artifactFileName(artifact)}</strong>
-                <span>{artifact.type}</span>
-              </a>
-            ))}
-          </div>
+          <h3>结果下载</h3>
+          <p className="field-hint">
+            下载包仅包含 Excel、词云和关键词图片等业务产物；内部 JSON 仅用于页面展示和复用判断，不进入下载包。
+          </p>
           <div className="actions" style={{ marginTop: 18 }}>
             {comparison ? (
               <a className="button" href={comparison.zip_url}>
                 下载对比 ZIP
+              </a>
+            ) : null}
+            {dimensionExcel ? (
+              <a className="button secondary" href={dimensionExcel.url}>
+                下载多维度 Excel
               </a>
             ) : null}
             <button
@@ -667,7 +699,7 @@ export default function ResultPage() {
             </button>
           </div>
           <p className="field-hint" style={{ marginTop: 12 }}>
-            完整 JSON、每车脱敏 JSON 快照和 metrics 保留 {comparison?.retention_days ?? 3} 天。
+            页面渲染和复用判断所需的内部数据保留 {comparison?.retention_days ?? 3} 天。
           </p>
         </div>
       </main>

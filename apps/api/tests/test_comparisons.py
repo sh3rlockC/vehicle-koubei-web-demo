@@ -352,6 +352,47 @@ def test_comparison_progress_uses_child_job_live_stage_progress(tmp_path: Path) 
     assert payload["estimated_remaining_minutes"] == 15
 
 
+def test_get_comparison_result_returns_dimension_winner_fields(tmp_path: Path) -> None:
+    client, _queue = make_client(tmp_path)
+    authorize(client)
+    session = get_session_local()()
+    try:
+        session.add(
+            ComparisonJob(
+                comparison_id="cmp_result_winner",
+                status="completed",
+                current_stage="completed",
+                passphrase_version="2026-W17",
+                vehicle_count=2,
+                report_json={
+                    "dimensions": [
+                        {
+                            "dimension": "空间",
+                            "winner_model_names": ["车型A"],
+                            "winner_score": 0.8,
+                            "winner_label": "车型A",
+                            "vehicles": [
+                                {"model_name": "车型A", "positive_mentions": 4, "negative_mentions": 1},
+                                {"model_name": "车型B", "positive_mentions": 3, "negative_mentions": 3},
+                            ],
+                        }
+                    ]
+                },
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    response = client.get("/api/comparisons/cmp_result_winner")
+
+    assert response.status_code == 200
+    dimension = response.json()["report_json"]["dimensions"][0]
+    assert dimension["winner_model_names"] == ["车型A"]
+    assert dimension["winner_score"] == 0.8
+    assert dimension["winner_label"] == "车型A"
+
+
 def test_comparison_zip_downloads_comparison_outputs_and_source_snapshots(tmp_path: Path) -> None:
     client, _queue = make_client(tmp_path)
     authorize(client)

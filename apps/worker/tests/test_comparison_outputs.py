@@ -55,8 +55,20 @@ def test_generate_comparison_outputs_writes_dimension_matrix_excel(tmp_path: Pat
                 {
                     "comment_id": "a2",
                     "date": "2026-03-02",
-                    "section_facts": {"positive": "外观好看", "negative": "能耗偏高"},
-                    "local_keywords": ["外观", "能耗"],
+                    "section_facts": {"positive": "外观好看，内饰做工好，舒适性不错", "negative": "能耗偏高，内饰异味，座椅偏硬"},
+                    "local_keywords": ["外观", "能耗", "内饰", "舒适"],
+                },
+                {
+                    "comment_id": "a3",
+                    "date": "2026-03-03",
+                    "section_facts": {"positive": "座椅舒适，隔音舒适", "negative": "胎噪影响舒适性"},
+                    "local_keywords": ["舒适"],
+                },
+                {
+                    "comment_id": "a4",
+                    "date": "2026-03-04",
+                    "section_facts": {"positive": "", "negative": "舒适性还有颠簸"},
+                    "local_keywords": ["舒适"],
                 },
             ],
         ),
@@ -67,8 +79,14 @@ def test_generate_comparison_outputs_writes_dimension_matrix_excel(tmp_path: Pat
                 {
                     "comment_id": "b1",
                     "date": "2026-03-01",
-                    "section_facts": {"positive": "智能驾驶好用", "negative": "第三排空间小"},
-                    "local_keywords": ["智能化", "空间"],
+                    "section_facts": {"positive": "智能驾驶好用，内饰屏幕好，座椅舒适", "negative": "第三排空间小，内饰塑料感，舒适性一般"},
+                    "local_keywords": ["智能化", "空间", "内饰", "舒适"],
+                },
+                {
+                    "comment_id": "b2",
+                    "date": "2026-03-02",
+                    "section_facts": {"positive": "", "negative": "隔音影响舒适"},
+                    "local_keywords": ["舒适"],
                 }
             ],
         ),
@@ -95,18 +113,34 @@ def test_generate_comparison_outputs_writes_dimension_matrix_excel(tmp_path: Pat
     assert space[0]["positive_evidence_ids"] == ["a1"]
     assert space[1]["positive_mentions"] == 0
     assert space[1]["negative_mentions"] == 1
+    assert report["dimensions"][0]["winner_model_names"] == ["车型A"]
+    assert report["dimensions"][0]["winner_score"] == 1.0
+    assert report["dimensions"][0]["winner_label"] == "车型A"
+    interior = report["dimensions"][2]
+    assert interior["winner_model_names"] == ["车型A", "车型B"]
+    assert interior["winner_label"] == "车型A、车型B"
+    value = report["dimensions"][3]
+    assert value["winner_model_names"] == []
+    assert value["winner_score"] is None
+    assert value["winner_label"] == "无数据"
+    comfort = report["dimensions"][7]
+    assert comfort["winner_model_names"] == ["车型A"]
+    assert comfort["winner_label"] == "车型A"
 
     dimension_path = tmp_path / "comparison" / "comparison_dimension_matrix.xlsx"
     assert str(dimension_path) in result["artifact_paths"]
     workbook = load_workbook(dimension_path)
     matrix = workbook["维度对比"]
     assert matrix.cell(row=1, column=1).value == "维度"
-    assert matrix.cell(row=1, column=2).value == "车型A 优点提及数"
-    assert matrix.cell(row=1, column=3).value == "车型A 槽点提及数"
+    assert matrix.cell(row=1, column=2).value == "车型对比胜者"
+    assert matrix.cell(row=1, column=3).value == "车型A 优点提及数"
+    assert matrix.cell(row=1, column=4).value == "车型A 槽点提及数"
     assert matrix.cell(row=2, column=1).value == "空间"
-    assert matrix.cell(row=2, column=2).value == 1
-    assert matrix.cell(row=2, column=3).value == 0
-    assert matrix.cell(row=2, column=2).fill.fgColor.rgb == "FFC6EFCE"
-    assert matrix.cell(row=2, column=3).fill.fgColor.rgb == "FFFFC7CE"
+    assert matrix.cell(row=2, column=2).value == "车型A"
+    assert matrix.cell(row=2, column=3).value == 1
+    assert matrix.cell(row=2, column=4).value == 0
+    assert matrix.cell(row=2, column=3).fill.fgColor.rgb == "FFC6EFCE"
+    assert matrix.cell(row=2, column=4).fill.fgColor.rgb == "FFFFC7CE"
+    assert matrix.cell(row=9, column=2).value == "车型A"
     conclusion = workbook["结论"]
     assert conclusion.cell(row=1, column=1).value == "LLM 多车型对比结论"
