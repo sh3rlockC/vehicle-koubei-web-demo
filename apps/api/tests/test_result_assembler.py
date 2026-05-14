@@ -270,7 +270,7 @@ def test_result_zip_download_bundles_excel_and_wordcloud_files(tmp_path: Path) -
     assert all(content.startswith(b"\x89PNG\r\n\x1a\n") for content in rank_pngs.values())
 
 
-def test_result_zip_download_includes_hermes_final_report_json(tmp_path: Path) -> None:
+def test_result_zip_download_excludes_hermes_final_report_json(tmp_path: Path) -> None:
     final_report = tmp_path / "final_report.json"
     final_report.write_text('{"headline":"Hermes"}', encoding="utf-8")
     client = make_client(tmp_path)
@@ -285,10 +285,10 @@ def test_result_zip_download_includes_hermes_final_report_json(tmp_path: Path) -
     with zipfile.ZipFile(BytesIO(response.content)) as archive:
         names = set(archive.namelist())
 
-    assert "final_report.json" in names
+    assert "final_report.json" not in names
 
 
-def test_result_zip_download_includes_hermes_facts_and_metrics(tmp_path: Path) -> None:
+def test_result_zip_download_excludes_hermes_facts_and_metrics(tmp_path: Path) -> None:
     final_report = tmp_path / "final_report.json"
     analysis_facts = tmp_path / "analysis_facts.jsonl"
     llm_metrics = tmp_path / "llm_metrics.json"
@@ -311,8 +311,8 @@ def test_result_zip_download_includes_hermes_facts_and_metrics(tmp_path: Path) -
     with zipfile.ZipFile(BytesIO(response.content)) as archive:
         names = set(archive.namelist())
 
-    assert "analysis_facts.jsonl" in names
-    assert "llm_metrics.json" in names
+    assert "analysis_facts.jsonl" not in names
+    assert "llm_metrics.json" not in names
 
 
 def test_result_zip_download_skips_keyword_pngs_when_terms_excel_is_unreadable(tmp_path: Path) -> None:

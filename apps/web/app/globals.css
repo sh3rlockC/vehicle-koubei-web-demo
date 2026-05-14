@@ -726,6 +726,66 @@ details.card summary {
   margin-bottom: 8px;
 }
 
+.conclusion-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted-strong);
+  line-height: 1.7;
+}
+
+.comparison-table-wrap {
+  margin-top: 16px;
+  overflow-x: auto;
+  border: 1px solid rgba(126, 203, 255, 0.14);
+  border-radius: 16px;
+  background: rgba(3, 8, 18, 0.28);
+}
+
+.comparison-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.comparison-table th,
+.comparison-table td {
+  border-right: 1px solid rgba(126, 203, 255, 0.1);
+  border-bottom: 1px solid rgba(126, 203, 255, 0.1);
+  padding: 12px 14px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.comparison-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgba(13, 26, 42, 0.98);
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.comparison-table tbody th {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 152px;
+  background: rgba(13, 26, 42, 0.98);
+  color: var(--text-strong);
+  text-align: left;
+}
+
+.comparison-table .mention-positive {
+  color: var(--success);
+}
+
+.comparison-table .mention-negative {
+  color: var(--danger);
+}
+
 .download-list {
   display: grid;
   gap: 10px;

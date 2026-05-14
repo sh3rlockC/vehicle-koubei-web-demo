@@ -226,9 +226,9 @@ def test_time_report_detail_is_scoped_to_owning_job_and_zip_downloads_artifacts(
     with zipfile.ZipFile(BytesIO(zip_response.content)) as archive:
         names = set(archive.namelist())
 
-    assert "final_report.json" in names
-    assert "analysis_facts.jsonl" in names
-    assert "llm_metrics.json" in names
+    assert "final_report.json" not in names
+    assert "analysis_facts.jsonl" not in names
+    assert "llm_metrics.json" not in names
     assert "测试车_2026-03-02_2026-03-03_时间范围口碑摘要.xlsx" in names
     assert "测试车_优点词云.png" in names
     assert "测试车_词云词项清单.xlsx" in names

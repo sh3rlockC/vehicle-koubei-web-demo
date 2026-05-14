@@ -332,6 +332,24 @@ class DatabaseJobStore:
                     artifacts[suffix] = path
         return artifacts
 
+    def comparison_downloadable_artifacts(self, job_id: str) -> list[str]:
+        query = text(
+            """
+            SELECT artifact_path
+            FROM job_artifacts
+            WHERE job_id = :job_id
+            ORDER BY id ASC
+            """
+        )
+        with self.engine.begin() as conn:
+            rows = conn.execute(query, {"job_id": job_id}).mappings().all()
+        paths: list[str] = []
+        for row in rows:
+            path = str(row["artifact_path"])
+            if path.lower().endswith((".xlsx", ".png")):
+                paths.append(path)
+        return paths
+
     def mark_comparison_completed(
         self,
         comparison_id: str,
@@ -368,6 +386,7 @@ class DatabaseJobStore:
             )
             conn.execute(text("DELETE FROM comparison_artifacts WHERE comparison_id = :comparison_id"), {"comparison_id": comparison_id})
             for artifact_path in artifact_paths:
+                artifact_name = artifact_path.rsplit("/", 1)[-1]
                 conn.execute(
                     text(
                         """
@@ -379,7 +398,9 @@ class DatabaseJobStore:
                         "comparison_id": comparison_id,
                         "artifact_type": self._infer_comparison_artifact_type(artifact_path),
                         "artifact_path": artifact_path,
-                        "source_stage": "snapshot" if ".final_report." in artifact_path or ".analysis_facts." in artifact_path else "comparison",
+                        "source_stage": "comparison"
+                        if artifact_name in {"final_comparison.json", "comparison_summary.xlsx", "comparison_dimension_matrix.xlsx", "llm_metrics.json"}
+                        else "snapshot",
                         "created_at": now,
                     },
                 )
@@ -804,6 +825,8 @@ class DatabaseJobStore:
             return "comparison_json"
         if name == "comparison_summary.xlsx":
             return "comparison_excel"
+        if name == "comparison_dimension_matrix.xlsx":
+            return "comparison_dimension_excel"
         if name.endswith(".analysis_facts.jsonl"):
             return "source_analysis_facts_jsonl"
         if name.endswith(".final_report.json"):

@@ -356,17 +356,24 @@ def test_comparison_zip_downloads_comparison_outputs_and_source_snapshots(tmp_pa
     client, _queue = make_client(tmp_path)
     authorize(client)
     comparison_dir = tmp_path / "artifacts" / "cmp_zip" / "comparisons"
-    comparison_dir.mkdir(parents=True)
+    vehicle_dir = comparison_dir / "测试车A"
+    vehicle_dir.mkdir(parents=True)
     final_comparison = comparison_dir / "final_comparison.json"
     summary = comparison_dir / "comparison_summary.xlsx"
+    dimension_matrix = comparison_dir / "comparison_dimension_matrix.xlsx"
     source_report = comparison_dir / "测试车A.final_report.json"
     source_facts = comparison_dir / "测试车A.analysis_facts.jsonl"
     metrics = comparison_dir / "llm_metrics.json"
+    vehicle_summary = vehicle_dir / "测试车A_双平台口碑摘要.xlsx"
+    vehicle_wordcloud = vehicle_dir / "测试车A_优点词云.png"
     final_comparison.write_text('{"headline":"竞品对比"}', encoding="utf-8")
     summary.write_text("xlsx-placeholder", encoding="utf-8")
+    dimension_matrix.write_text("xlsx-placeholder", encoding="utf-8")
     source_report.write_text('{"headline":"测试车A"}', encoding="utf-8")
     source_facts.write_text('{"comment_id":"autohome_0001"}\n', encoding="utf-8")
     metrics.write_text('{"source":"fixture"}', encoding="utf-8")
+    vehicle_summary.write_text("xlsx-placeholder", encoding="utf-8")
+    vehicle_wordcloud.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
 
     session = get_session_local()()
     try:
@@ -383,9 +390,12 @@ def test_comparison_zip_downloads_comparison_outputs_and_source_snapshots(tmp_pa
             [
                 ComparisonArtifact(comparison_id="cmp_zip", artifact_type="comparison_json", artifact_path=str(final_comparison), source_stage="comparison"),
                 ComparisonArtifact(comparison_id="cmp_zip", artifact_type="comparison_excel", artifact_path=str(summary), source_stage="comparison"),
+                ComparisonArtifact(comparison_id="cmp_zip", artifact_type="comparison_dimension_excel", artifact_path=str(dimension_matrix), source_stage="comparison"),
                 ComparisonArtifact(comparison_id="cmp_zip", artifact_type="source_final_report_json", artifact_path=str(source_report), source_stage="snapshot"),
                 ComparisonArtifact(comparison_id="cmp_zip", artifact_type="source_analysis_facts_jsonl", artifact_path=str(source_facts), source_stage="snapshot"),
                 ComparisonArtifact(comparison_id="cmp_zip", artifact_type="llm_metrics_json", artifact_path=str(metrics), source_stage="comparison"),
+                ComparisonArtifact(comparison_id="cmp_zip", artifact_type="excel", artifact_path=str(vehicle_summary), source_stage="snapshot"),
+                ComparisonArtifact(comparison_id="cmp_zip", artifact_type="image_png", artifact_path=str(vehicle_wordcloud), source_stage="snapshot"),
             ]
         )
         session.commit()
@@ -398,8 +408,8 @@ def test_comparison_zip_downloads_comparison_outputs_and_source_snapshots(tmp_pa
     with zipfile.ZipFile(BytesIO(response.content)) as archive:
         names = set(archive.namelist())
 
-    assert "final_comparison.json" in names
     assert "comparison_summary.xlsx" in names
-    assert "测试车A.final_report.json" in names
-    assert "测试车A.analysis_facts.jsonl" in names
-    assert "llm_metrics.json" in names
+    assert "comparison_dimension_matrix.xlsx" in names
+    assert "测试车A/测试车A_双平台口碑摘要.xlsx" in names
+    assert "测试车A/测试车A_优点词云.png" in names
+    assert not any(name.endswith((".json", ".jsonl")) for name in names)

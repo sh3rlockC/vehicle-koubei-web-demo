@@ -59,9 +59,7 @@ def _ensure_session(request: Request, settings: Settings) -> None:
 
 def _is_result_bundle_artifact(path: str) -> bool:
     lower_path = path.lower()
-    return lower_path.endswith((".xlsx", ".png")) or lower_path.endswith(
-        ("final_report.json", "analysis_facts.jsonl", "llm_metrics.json")
-    )
+    return lower_path.endswith((".xlsx", ".png"))
 
 
 def _is_wordcloud_terms_artifact(path: str) -> bool:
@@ -70,7 +68,7 @@ def _is_wordcloud_terms_artifact(path: str) -> bool:
 
 def _is_time_report_artifact(path: str) -> bool:
     lower_path = path.lower()
-    return lower_path.endswith((".xlsx", ".png", ".json", ".jsonl"))
+    return lower_path.endswith((".xlsx", ".png"))
 
 
 def _safe_zip_name(path: Path, seen: set[str]) -> str:

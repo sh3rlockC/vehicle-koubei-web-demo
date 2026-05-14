@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import logging
 import zipfile
 from pathlib import Path
 from urllib.parse import quote
@@ -32,10 +33,13 @@ from app.services.comparisons import (
 )
 from app.services.confirmed_vehicle_series import query_key, upsert_confirmed_vehicle_series
 from app.services.job_queue import get_job_queue
+from app.services.keyword_rank_images import build_keyword_rank_pngs
 from app.services.passphrase import require_passphrase_session
+from app.services.result_reader import read_wordcloud_terms_workbook_or_empty
 from app.services.vehicle_resolver import VehicleResolver
 
 router = APIRouter(prefix="/api/comparisons", tags=["comparisons"])
+logger = logging.getLogger(__name__)
 QUEUE_UNAVAILABLE_MESSAGE = "任务队列暂不可用，请确认 Redis 和 worker 已启动。"
 
 
@@ -60,6 +64,35 @@ def _safe_zip_name(path: Path, seen: set[str]) -> str:
     index = 2
     while True:
         candidate = f"{stem}_{index}{suffix}"
+        if candidate not in seen:
+            seen.add(candidate)
+            return candidate
+        index += 1
+
+
+def _is_comparison_bundle_artifact(path: Path) -> bool:
+    return path.name.lower().endswith((".xlsx", ".png"))
+
+
+def _is_wordcloud_terms_artifact(path: Path) -> bool:
+    return path.name.lower().endswith("_词云词项清单.xlsx")
+
+
+def _comparison_arcname(path: Path, comparison_root: Path, seen: set[str]) -> str:
+    try:
+        arcname = path.relative_to(comparison_root).as_posix()
+    except ValueError:
+        arcname = _safe_zip_name(path, seen)
+    if arcname not in seen:
+        seen.add(arcname)
+        return arcname
+    stem = Path(arcname).stem
+    suffix = Path(arcname).suffix
+    parent = Path(arcname).parent.as_posix()
+    index = 2
+    while True:
+        name = f"{stem}_{index}{suffix}"
+        candidate = name if parent == "." else f"{parent}/{name}"
         if candidate not in seen:
             seen.add(candidate)
             return candidate
@@ -238,15 +271,29 @@ def download_comparison_bundle(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="comparison not found")
 
     paths = [Path(artifact.artifact_path) for artifact in sorted(comparison.artifacts, key=lambda item: item.id)]
-    paths = [path for path in paths if path.exists()]
+    paths = [path for path in paths if path.exists() and _is_comparison_bundle_artifact(path)]
     if not paths:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="no downloadable comparison artifacts")
 
     buffer = BytesIO()
     seen_names: set[str] = set()
+    comparison_root = settings.artifact_root_path / comparison_id / "comparisons"
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in paths:
-            archive.write(path, arcname=_safe_zip_name(path, seen_names))
+            archive.write(path, arcname=_comparison_arcname(path, comparison_root, seen_names))
+        for term_path in (path for path in paths if _is_wordcloud_terms_artifact(path)):
+            rankings = read_wordcloud_terms_workbook_or_empty(term_path)
+            if not any(rankings.values()):
+                continue
+            try:
+                term_parent = Path(_comparison_arcname(term_path, comparison_root, set())).parent.as_posix()
+                for filename, content in build_keyword_rank_pngs(rankings):
+                    arcname = filename if term_parent == "." else f"{term_parent}/{filename}"
+                    if arcname not in seen_names:
+                        seen_names.add(arcname)
+                        archive.writestr(arcname, content)
+            except Exception as exc:
+                logger.warning("failed to render comparison keyword rank pngs for %s: %s", term_path, exc)
 
     filename = f"{comparison.comparison_id}_竞品对比结果.zip"
     encoded_filename = quote(filename)
