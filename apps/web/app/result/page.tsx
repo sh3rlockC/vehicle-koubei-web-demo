@@ -2,10 +2,11 @@
 
 import Link from "next/link";
 import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { SignalPanel, StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError, toJsonBody } from "@/lib/api";
 import type {
+  ArtifactItem,
   ComparisonResultResponse,
   CreateTimeReportRequest,
   JobCommentPageResponse,
@@ -56,6 +57,73 @@ function asText(value: unknown, fallback = "") {
     return String(value);
   }
   return fallback;
+}
+
+type ComparisonDimensionVehicle = {
+  model_name: string;
+  positive_mentions: number;
+  negative_mentions: number;
+};
+
+type ComparisonDimensionRow = {
+  dimension: string;
+  vehicles: ComparisonDimensionVehicle[];
+};
+
+type ComparisonConclusion = {
+  summary: string;
+  rationale_bullets: string[];
+  source: string;
+};
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function asNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function comparisonConclusion(report: Record<string, unknown> | undefined): ComparisonConclusion {
+  const conclusion = asRecord(report?.conclusion);
+  const bullets = Array.isArray(conclusion.rationale_bullets)
+    ? conclusion.rationale_bullets.map((item) => asText(item)).filter(Boolean)
+    : [];
+  return {
+    summary: asText(conclusion.summary, "对比结果生成后会显示在这里。"),
+    rationale_bullets: bullets,
+    source: asText(conclusion.source, "fallback"),
+  };
+}
+
+function comparisonDimensions(report: Record<string, unknown> | undefined): ComparisonDimensionRow[] {
+  const rows = Array.isArray(report?.dimensions) ? report.dimensions : [];
+  return rows
+    .map((row) => {
+      const record = asRecord(row);
+      const vehicles = Array.isArray(record.vehicles) ? record.vehicles : [];
+      return {
+        dimension: asText(record.dimension),
+        vehicles: vehicles.map((vehicle) => {
+          const item = asRecord(vehicle);
+          return {
+            model_name: asText(item.model_name),
+            positive_mentions: asNumber(item.positive_mentions),
+            negative_mentions: asNumber(item.negative_mentions),
+          };
+        }),
+      };
+    })
+    .filter((row) => row.dimension && row.vehicles.length);
+}
+
+function isBusinessDownloadArtifact(artifact: ArtifactItem) {
+  const lowerPath = artifact.path.toLowerCase();
+  return lowerPath.endsWith(".xlsx") || lowerPath.endsWith(".png");
+}
+
+function artifactFileName(artifact: ArtifactItem) {
+  return artifact.path.split("/").pop() || artifact.path;
 }
 
 function statusTone(status: string): "default" | "success" | "warning" | "danger" | "accent" {
@@ -468,9 +536,14 @@ export default function ResultPage() {
     }
 
     const comparison = comparisonResult;
-    const vehicles = Array.isArray(comparison?.report_json?.vehicles) ? comparison.report_json.vehicles : [];
+    const reportJson = comparison?.report_json;
+    const vehicles = Array.isArray(reportJson?.vehicles) ? reportJson.vehicles : [];
+    const dimensions = comparisonDimensions(reportJson);
+    const conclusion = comparisonConclusion(reportJson);
+    const comparisonArtifacts = (comparison?.artifacts ?? []).filter(isBusinessDownloadArtifact);
+    const dimensionExcel = comparisonArtifacts.find((artifact) => artifactFileName(artifact) === "comparison_dimension_matrix.xlsx");
     const headline = asText(comparison?.report_json?.headline, "竞品口碑对比");
-    const summary = asText((comparison?.report_json?.comparison as Record<string, unknown> | undefined)?.summary, "对比结果生成后会显示在这里。");
+    const summary = conclusion.summary;
 
     return (
       <main className="stack-lg">
@@ -486,6 +559,13 @@ export default function ResultPage() {
             <h2>{headline}</h2>
             <p className="helper">{summary}</p>
           </div>
+          {conclusion.rationale_bullets.length ? (
+            <ul className="conclusion-list">
+              {conclusion.rationale_bullets.map((item, index) => (
+                <li key={`${item}-${index}`}>{item}</li>
+              ))}
+            </ul>
+          ) : null}
           {error ? <p className="error">{error}</p> : null}
         </SignalPanel>
 
@@ -505,11 +585,66 @@ export default function ResultPage() {
         </div>
 
         <div className="card">
+          <div className="section-header compact">
+            <p className="eyebrow">DIMENSION MATRIX</p>
+            <h3>多车型多维度提及数对比</h3>
+            <p className="field-hint">同一条评论在同一维度的优点或槽点最多计 1 次。</p>
+          </div>
+          {dimensions.length ? (
+            <div className="comparison-table-wrap">
+              <table className="comparison-table">
+                <thead>
+                  <tr>
+                    <th>维度</th>
+                    {dimensions[0].vehicles.map((vehicle) => (
+                      <th colSpan={2} key={vehicle.model_name || "车型"}>
+                        {vehicle.model_name || "车型"}
+                      </th>
+                    ))}
+                  </tr>
+                  <tr>
+                    <th />
+                    {dimensions[0].vehicles.map((vehicle) => (
+                      <Fragment key={`${vehicle.model_name}-heads`}>
+                        <th className="mention-positive">优点提及数</th>
+                        <th className="mention-negative">槽点提及数</th>
+                      </Fragment>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {dimensions.map((row) => (
+                    <tr key={row.dimension}>
+                      <th>{row.dimension}</th>
+                      {row.vehicles.map((vehicle) => (
+                        <Fragment key={`${row.dimension}-${vehicle.model_name}`}>
+                          <td className="mention-positive">{vehicle.positive_mentions}</td>
+                          <td className="mention-negative">{vehicle.negative_mentions}</td>
+                        </Fragment>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="status-copy">当前对比结果暂未返回维度矩阵。</p>
+          )}
+          {dimensionExcel ? (
+            <div className="actions" style={{ marginTop: 16 }}>
+              <a className="button secondary" href={dimensionExcel.url}>
+                下载多维度 Excel
+              </a>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="card">
           <h3>结果文件</h3>
           <div className="artifact-grid">
-            {(comparison?.artifacts ?? []).map((artifact) => (
+            {comparisonArtifacts.map((artifact) => (
               <a key={artifact.id} className="artifact-card" href={artifact.url}>
-                <strong>{artifact.path.split("/").pop()}</strong>
+                <strong>{artifactFileName(artifact)}</strong>
                 <span>{artifact.type}</span>
               </a>
             ))}

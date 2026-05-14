@@ -72,6 +72,38 @@ def _copy_snapshot_artifacts(
     )
 
 
+def _unique_target(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    index = 2
+    while True:
+        candidate = path.with_name(f"{stem}_{index}{suffix}")
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def _copy_vehicle_downloadable_artifacts(
+    *,
+    vehicle: ComparisonVehicleInputs,
+    source_paths: list[str],
+    output_dir: Path,
+) -> list[str]:
+    vehicle_dir = output_dir / _safe_filename_part(vehicle.model_name)
+    vehicle_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[str] = []
+    for source_value in source_paths:
+        source = Path(source_value)
+        if not source.exists() or not source.name.lower().endswith((".xlsx", ".png")):
+            continue
+        target = _unique_target(vehicle_dir / source.name)
+        shutil.copy2(source, target)
+        copied.append(str(target))
+    return copied
+
+
 def run_job(
     *,
     job_id: str,
@@ -222,6 +254,13 @@ def run_comparison_job(
             )
             snapshots.append(snapshot)
             artifact_paths.extend(copied_paths)
+            artifact_paths.extend(
+                _copy_vehicle_downloadable_artifacts(
+                    vehicle=vehicle,
+                    source_paths=store.comparison_downloadable_artifacts(source_job_id),
+                    output_dir=comparison_dir,
+                )
+            )
         except Exception as exc:
             error_message = str(exc) or exc.__class__.__name__
             store.mark_comparison_vehicle_status(
@@ -253,7 +292,7 @@ def run_comparison_job(
         env=dict(os.environ),
     )
     artifact_paths.extend(result["artifact_paths"])
-    degraded = bool(excluded)
+    degraded = bool(excluded) or bool(result.get("degraded"))
     report_json = dict(result["report_json"])
     if excluded:
         report_json["excluded_vehicles"] = excluded

@@ -216,6 +216,27 @@ def test_run_time_report_marks_failed_without_raising(monkeypatch, tmp_path: Pat
     }
 
 
+def test_copy_vehicle_downloadable_artifacts_keeps_only_excel_and_png(tmp_path: Path) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    summary = source_dir / "测试车_双平台口碑摘要.xlsx"
+    wordcloud = source_dir / "测试车_优点词云.png"
+    final_report = source_dir / "final_report.json"
+    summary.write_text("xlsx", encoding="utf-8")
+    wordcloud.write_bytes(b"\x89PNG\r\n\x1a\n")
+    final_report.write_text("{}", encoding="utf-8")
+
+    copied = worker_jobs._copy_vehicle_downloadable_artifacts(
+        vehicle=SimpleNamespace(model_name="测试车"),
+        source_paths=[str(summary), str(wordcloud), str(final_report)],
+        output_dir=tmp_path / "comparison",
+    )
+
+    assert sorted(Path(path).name for path in copied) == ["测试车_优点词云.png", "测试车_双平台口碑摘要.xlsx"]
+    assert (tmp_path / "comparison" / "测试车" / "测试车_双平台口碑摘要.xlsx").exists()
+    assert not (tmp_path / "comparison" / "测试车" / "final_report.json").exists()
+
+
 def make_dependency_map(tmp_path: Path) -> dict[str, dict[str, str]]:
     return {
         "auto-koubei-collector": {"path": str(tmp_path), "entrypoint": "auto.py"},
