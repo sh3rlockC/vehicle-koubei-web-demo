@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import type { FormEvent } from "react";
 import { Fragment, useEffect, useState } from "react";
 import { SignalPanel, StatusPill } from "@/app/components/ui";
@@ -18,6 +19,7 @@ import type {
   TimeReportResponse,
 } from "@/lib/api-types";
 import { clearFlowState, getFlowState, setFlowState } from "@/lib/flow-state";
+import { withBasePath } from "@/lib/paths";
 
 const statusLabels: Record<string, string> = {
   completed: "已完成",
@@ -265,6 +267,7 @@ function KeywordRankList({
 }
 
 export default function ResultPage() {
+  const router = useRouter();
   const flowState = getFlowState();
   const [ready, setReady] = useState(false);
   const [result, setResult] = useState<JobResultResponse | null>(null);
@@ -678,12 +681,12 @@ export default function ResultPage() {
           </p>
           <div className="actions" style={{ marginTop: 18 }}>
             {comparison ? (
-              <a className="button" href={comparison.zip_url}>
+              <a className="button" href={withBasePath(comparison.zip_url)}>
                 下载对比 ZIP
               </a>
             ) : null}
             {dimensionExcel ? (
-              <a className="button secondary" href={dimensionExcel.url}>
+              <a className="button secondary" href={withBasePath(dimensionExcel.url)}>
                 下载多维度 Excel
               </a>
             ) : null}
@@ -692,7 +695,7 @@ export default function ResultPage() {
               type="button"
               onClick={() => {
                 clearFlowState();
-                window.location.href = "/passphrase";
+                router.push("/passphrase");
               }}
             >
               重新开始
@@ -740,7 +743,7 @@ export default function ResultPage() {
     return <main className="panel guard">正在加载结果...</main>;
   }
 
-  const resultBundleUrl = `/api/jobs/${result.job_id}/artifacts.zip`;
+  const resultBundleUrl = withBasePath(`/api/jobs/${result.job_id}/artifacts.zip`);
   const downloadableCount = result.artifacts.filter((artifact) =>
     artifact.path.toLowerCase().endsWith(".xlsx") || artifact.path.toLowerCase().endsWith(".png")
   ).length;
@@ -893,10 +896,10 @@ export default function ResultPage() {
             {result.wordcloud.positive_image_url || result.wordcloud.negative_image_url ? (
               <div className="wordcloud-preview">
                 {result.wordcloud.positive_image_url ? (
-                  <img src={result.wordcloud.positive_image_url} alt="优点词云" />
+                  <img src={withBasePath(result.wordcloud.positive_image_url)} alt="优点词云" />
                 ) : null}
                 {result.wordcloud.negative_image_url ? (
-                  <img src={result.wordcloud.negative_image_url} alt="槽点词云" />
+                  <img src={withBasePath(result.wordcloud.negative_image_url)} alt="槽点词云" />
                 ) : null}
               </div>
             ) : (
@@ -1088,7 +1091,7 @@ export default function ResultPage() {
                       {report.error_message ? <p className="error">{report.error_message}</p> : null}
                       <div className="actions">
                         {report.status === "completed" ? (
-                          <a className="button secondary" href={report.zip_url}>
+                          <a className="button secondary" href={withBasePath(report.zip_url)}>
                             下载 ZIP
                           </a>
                         ) : null}
@@ -1125,7 +1128,7 @@ export default function ResultPage() {
               type="button"
               onClick={() => {
                 clearFlowState();
-                window.location.href = "/passphrase";
+                router.push("/passphrase");
               }}
             >
               重新开始

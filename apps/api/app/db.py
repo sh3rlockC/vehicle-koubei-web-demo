@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from typing import Any
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, get_settings
@@ -25,6 +25,25 @@ def init_db(settings: Settings | None = None) -> None:
     _ENGINE = create_engine(settings.database_url, future=True, **_engine_kwargs(settings.database_url))
     _SESSION_LOCAL = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False, expire_on_commit=False, class_=Session)
     Base.metadata.create_all(_ENGINE)
+    _sync_existing_schema(_ENGINE)
+
+
+def _sync_existing_schema(engine) -> None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if "jobs" not in table_names:
+        return
+
+    job_columns = {column["name"] for column in inspector.get_columns("jobs")}
+    dialect = engine.dialect.name
+    with engine.begin() as conn:
+        if "collection_mode" not in job_columns:
+            conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_mode VARCHAR(32) NOT NULL DEFAULT 'incremental'"))
+        if "collection_summary" not in job_columns:
+            if dialect == "postgresql":
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_summary JSONB NOT NULL DEFAULT '{}'::jsonb"))
+            else:
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_summary JSON NOT NULL DEFAULT '{}'"))
 
 
 def get_session_local():

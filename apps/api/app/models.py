@@ -38,6 +38,8 @@ class Job(Base):
     degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     passphrase_version: Mapped[str] = mapped_column(String(64), nullable=False)
     queue_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    collection_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="incremental")
+    collection_summary: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -49,6 +51,29 @@ class Job(Base):
     ai_reports: Mapped[list["JobAIReport"]] = relationship(back_populates="job", cascade="all, delete-orphan")
     qa_chunks: Mapped[list["JobQAChunk"]] = relationship(back_populates="job", cascade="all, delete-orphan")
     time_reports: Mapped[list["JobTimeReport"]] = relationship(back_populates="job", cascade="all, delete-orphan")
+
+
+class KoubeiRawComment(Base):
+    __tablename__ = "koubei_raw_comments"
+    __table_args__ = (
+        UniqueConstraint("query_key", "platform", "series_id", "dedupe_key", name="uq_koubei_raw_comment_dedupe"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    query_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    query: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    series_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dedupe_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    row_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    first_seen_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_seen_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    published_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    page: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class JobCandidate(Base):

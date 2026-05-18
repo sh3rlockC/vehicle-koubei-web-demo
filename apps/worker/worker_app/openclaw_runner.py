@@ -229,16 +229,29 @@ def _build_autohome_message(command: StageCommand, settings: OpenClawSettings) -
     series_id = _command_arg(command, "--series-id")
     output_path = _command_arg(command, "--output")
     progress_file = _command_arg(command, "--progress-file")
+    known_links_file = _optional_command_arg(command, "--known-links-file")
+    max_scan_pages = _optional_command_arg(command, "--max-scan-pages")
+    stop_after_known_pages = _optional_command_arg(command, "--stop-after-known-pages")
     validation_path = str(Path(output_path).with_suffix(".validation.json"))
 
-    return "\n".join(
-        [
+    lines = [
             "请调用已安装或已加载的汽车之家口碑采集 skill，并严格按以下 contract 输出。",
             f"skill={settings.collector_skill}",
             f"series_id={series_id}",
             f"output_path={_host_path(output_path, settings)}",
             f"validation_json_path={_host_path(validation_path, settings)}",
             f"progress_file={_host_path(progress_file, settings)}",
+    ]
+    if known_links_file:
+        lines.extend(
+            [
+                f"known_links_file={_host_path(known_links_file, settings)}",
+                f"max_scan_pages={max_scan_pages or '10'}",
+                f"stop_after_known_pages={stop_after_known_pages or '2'}",
+            ]
+        )
+    lines.extend(
+        [
             "要求：",
             "1. 不要创建子代理、不要另起新对话；在当前任务中同步执行脚本并等待完成。",
             "2. 采集汽车之家用户口碑，输出 Excel 到 output_path。",
@@ -250,6 +263,7 @@ def _build_autohome_message(command: StageCommand, settings: OpenClawSettings) -
             "8. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
         ]
     )
+    return "\n".join(lines)
 
 
 def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str:
@@ -257,11 +271,13 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
     start_page = _optional_command_arg(command, "--start-page") or "1"
     output_path = _command_arg(command, "--output")
     progress_file = _command_arg(command, "--progress-file")
+    known_links_file = _optional_command_arg(command, "--known-links-file")
+    max_scan_pages = _optional_command_arg(command, "--max-scan-pages")
+    stop_after_known_pages = _optional_command_arg(command, "--stop-after-known-pages")
     validation_path = str(Path(output_path).with_suffix(".validation.json"))
     failed_pages_path = str(Path(output_path).with_suffix(".failed-pages.json"))
 
-    return "\n".join(
-        [
+    lines = [
             "请调用已安装或已加载的懂车帝口碑采集 skill，并严格按以下 contract 输出。",
             f"skill={settings.dcd_collector_skill}",
             f"series_id={series_id}",
@@ -270,6 +286,17 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
             f"validation_json_path={_host_path(validation_path, settings)}",
             f"failed_pages_json_path={_host_path(failed_pages_path, settings)}",
             f"progress_file={_host_path(progress_file, settings)}",
+    ]
+    if known_links_file:
+        lines.extend(
+            [
+                f"known_links_file={_host_path(known_links_file, settings)}",
+                f"max_scan_pages={max_scan_pages or '10'}",
+                f"stop_after_known_pages={stop_after_known_pages or '2'}",
+            ]
+        )
+    lines.extend(
+        [
             "要求：",
             "1. 不要创建子代理、不要另起新对话；在当前任务中同步执行脚本并等待完成。",
             "2. 采集懂车帝用户口碑，输出 Excel 到 output_path。",
@@ -282,6 +309,7 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
             "9. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
         ]
     )
+    return "\n".join(lines)
 
 
 def _build_collector_message(command: StageCommand, settings: OpenClawSettings) -> str:
