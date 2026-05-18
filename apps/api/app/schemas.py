@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -9,6 +10,7 @@ APPROVED_JOB_STATUSES = [
     "access_pending",
     "candidate_pending",
     "queued",
+    "checking_incremental",
     "collecting_autohome",
     "collecting_dcd",
     "postprocessing",
@@ -67,6 +69,7 @@ class SelectedCandidates(BaseModel):
 class CreateJobRequest(BaseModel):
     query: str = Field(min_length=1, max_length=255)
     model_name: str | None = Field(default=None, max_length=255)
+    collection_mode: Literal["incremental", "full_refresh"] = "incremental"
     selected_candidates: SelectedCandidates
 
 
@@ -83,6 +86,7 @@ class JobOverviewResponse(BaseModel):
     model_name: str
     status: str
     current_stage: str
+    collection_mode: str = "incremental"
     degraded: bool
     passphrase_version: str
     queue_job_id: str | None
@@ -251,6 +255,20 @@ class SampleSummaryResponse(BaseModel):
     dcd_count: int
 
 
+class CollectionPlatformSummaryResponse(BaseModel):
+    existing_count: int = 0
+    new_count: int = 0
+    total_count: int = 0
+    pages_scanned: int = 0
+    mode: str = "incremental"
+    stop_reason: str | None = None
+
+
+class CollectionSummaryResponse(BaseModel):
+    autohome: CollectionPlatformSummaryResponse = Field(default_factory=CollectionPlatformSummaryResponse)
+    dongchedi: CollectionPlatformSummaryResponse = Field(default_factory=CollectionPlatformSummaryResponse)
+
+
 class JobResultResponse(BaseModel):
     job_id: str
     status: str
@@ -258,6 +276,7 @@ class JobResultResponse(BaseModel):
     model_name: str
     retention_days: int
     sample_summary: SampleSummaryResponse
+    collection_summary: CollectionSummaryResponse = Field(default_factory=CollectionSummaryResponse)
     template_report: TemplateReportResponse
     structured_sections: StructuredSectionsResponse
     wordcloud: WordcloudResponse
@@ -337,6 +356,35 @@ class TimeReportResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None
+
+
+class AdminRedisFailedJobItem(BaseModel):
+    job_id: str
+    status: str | None = None
+    origin: str | None = None
+    description: str | None = None
+
+
+class AdminDbFailedJobItem(BaseModel):
+    job_id: str
+    query: str
+    model_name: str
+    current_stage: str
+    created_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class AdminFailedJobsResponse(BaseModel):
+    redis_failed_jobs: list[AdminRedisFailedJobItem] = Field(default_factory=list)
+    db_failed_jobs: list[AdminDbFailedJobItem] = Field(default_factory=list)
+    redis_error: str | None = None
+
+
+class AdminFailedJobsDeleteResponse(BaseModel):
+    redis_removed_job_ids: list[str] = Field(default_factory=list)
+    db_expired_job_ids: list[str] = Field(default_factory=list)
+    deleted_artifact_dirs: list[str] = Field(default_factory=list)
+    redis_error: str | None = None
 
 
 class TimeReportListResponse(BaseModel):

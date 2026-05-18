@@ -17,12 +17,15 @@ services:
     build:
       context: .
       dockerfile: ./ops/docker/web.Dockerfile
+      args:
+        NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-}
     environment:
       PORT: 3000
       NODE_ENV: production
       BACKEND_ORIGIN: ${BACKEND_ORIGIN:-http://api:8000}
+      NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-}
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/passphrase').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))\""]
+      test: ["CMD-SHELL", "node -e \"const base = process.env.NEXT_PUBLIC_BASE_PATH || ''; fetch('http://127.0.0.1:3000' + base + '/passphrase').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))\""]
       interval: 30s
       timeout: 10s
       retries: 5

@@ -12,6 +12,7 @@ const terminalStatuses = new Set(["completed", "completed_degraded", "failed", "
 
 const stageLabels: Record<string, string> = {
   queued: "排队中",
+  checking_incremental: "检查历史语料",
   collecting_autohome: "采集汽车之家",
   collecting_dcd: "采集懂车帝",
   postprocessing: "汇总整理",

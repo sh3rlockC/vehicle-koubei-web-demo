@@ -109,6 +109,8 @@ def create_job(
         model_name=model_name,
         status="queued",
         current_stage="queued",
+        collection_mode=payload.collection_mode,
+        collection_summary={},
         passphrase_version=settings.pass_phrase_version,
     )
     db.add(job)
@@ -237,6 +239,7 @@ def get_job_progress(
     status_to_percent = {
         "queued": 5,
         "candidate_pending": 10,
+        "checking_incremental": 12,
         "collecting_autohome": 25,
         "collecting_dcd": 40,
         "postprocessing": 55,
@@ -254,6 +257,7 @@ def get_job_progress(
     overall_percent = status_to_percent.get(job.current_stage, status_to_percent.get(job.status, 0))
     message = {
         "queued": "任务已创建，等待执行",
+        "checking_incremental": "正在检查历史语料并准备增量采集",
         "completed": "任务已完成",
         "completed_degraded": "任务已完成，部分结果降级",
         "failed": "任务执行失败",

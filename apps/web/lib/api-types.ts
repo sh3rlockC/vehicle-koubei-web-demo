@@ -65,6 +65,20 @@ export type SampleSummary = {
   dcd_count: number;
 };
 
+export type CollectionPlatformSummary = {
+  existing_count: number;
+  new_count: number;
+  total_count: number;
+  pages_scanned: number;
+  mode: string;
+  stop_reason: string | null;
+};
+
+export type CollectionSummary = {
+  autohome: CollectionPlatformSummary;
+  dongchedi: CollectionPlatformSummary;
+};
+
 export type TemplateReport = {
   title: string;
   highlights: string[];
@@ -180,6 +194,7 @@ export type JobResultResponse = {
   model_name: string;
   retention_days: number;
   sample_summary: SampleSummary;
+  collection_summary: CollectionSummary;
   template_report: TemplateReport;
   structured_sections: StructuredSections;
   wordcloud: Wordcloud;
